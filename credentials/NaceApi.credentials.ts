@@ -1,11 +1,11 @@
 import type {
 	ICredentialDataDecryptedObject,
 	IHttpRequestOptions,
-	ICredentialTestRequest,
 	ICredentialType,
+	ICredentialTestRequest,
 	INodeProperties,
 } from 'n8n-workflow';
-import { BASE_URL_EXPRESSION, CLIENT } from '../nodes/Nace/constants';
+import { CLIENT } from '../nodes/Nace/constants';
 import { resolveBaseUrl } from '../nodes/Nace/baseUrl';
 
 export class NaceApi implements ICredentialType {
@@ -54,18 +54,20 @@ export class NaceApi implements ICredentialType {
 		credentials: ICredentialDataDecryptedObject,
 		requestOptions: IHttpRequestOptions,
 	): Promise<IHttpRequestOptions> {
-		resolveBaseUrl(credentials);
+		const baseUrl = resolveBaseUrl(credentials);
 		return {
 			...requestOptions,
+			...(requestOptions.baseURL === undefined ? {} : { baseURL: baseUrl }),
 			headers: { ...requestOptions.headers, Authorization: `Bearer ${credentials.apiKey}` },
 		};
 	}
-
 	test: ICredentialTestRequest = {
 		request: {
-			baseURL: BASE_URL_EXPRESSION,
+			baseURL:
+				"={{ ($credentials.backend === 'openrouter' ? ($credentials.openRouterBaseUrl || 'https://openrouter.ai/api') : ($credentials.baseUrl || 'https://console.nace.ai')).trim().replace(/\\/+$/, '') }}",
 			url: '={{ $credentials.backend === "openrouter" ? "/v1/key" : "/v1/models" }}',
 			method: 'GET',
+			disableFollowRedirect: true,
 			headers: {
 				'User-Agent': CLIENT,
 				'X-Nace-Client': CLIENT,

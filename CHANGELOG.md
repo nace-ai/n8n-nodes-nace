@@ -2,6 +2,16 @@
 
 ## 0.1.0
 
+- Require HTTPS except local Nace development endpoints; reject URL userinfo, queries, and fragments and normalize endpoint paths.
+- Use n8n’s standard declarative credential test with validated, normalized URLs and n8n status/message reporting. Remove the node-level tester and deprecated-helper exemption.
+- Use e.g. text placeholders and parameter-specific messages with item numbers; preserve API type strings.
+- Redact successful JSON and construct execution errors from fixed safe projections without raw transport causes or request config.
+- Validate every requested answer before simplifying or routing; skip malformed model entries and report malformed lists clearly.
+- Bound responses at 8 MiB for decisions and 16 MiB for model lists. Check image signatures, metadata sizes, and running JSON budgets.
+- Require OpenRouter model prefixes, use its credits link, reserve Unsure route labels, limit model loading to one retry, and support Retry-After HTTP dates.
+- Pin the development CLI and workflow actions; isolate tarball building from environment-protected OIDC publishing.
+- Add deep error inspection and regression coverage for URL, credential, response, image, retry, and workflow behavior.
+
 - Enforce backend-specific image counts before requests: 4 on OpenRouter (DeepInfra), 8 on Nace.
 - Default to 5 retries with headerless backoff starting at 2 seconds, doubling to a 30-second cap; preserve retry-header handling and the 120-second total sleep budget.
 
