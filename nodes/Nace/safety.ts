@@ -27,6 +27,23 @@ export function cleanJson(value: unknown, secret: string, seen = new WeakSet<obj
 				]),
 			);
 }
+// Preserve input values outside plain objects/arrays. Only ancestor references are
+// cycles; repeated references on separate paths must retain their contents.
+export function cleanInput<T>(value: T, secret: string, ancestors = new WeakSet<object>()): T {
+	if (typeof value === 'string') return cleanText(value, secret) as T;
+	if (!Array.isArray(value) && !isObject(value)) return value;
+	if (ancestors.has(value)) return null as T;
+	ancestors.add(value);
+	try {
+		return (Array.isArray(value)
+			? value.map((entry) => cleanInput(entry, secret, ancestors))
+			: Object.fromEntries(
+					Object.entries(value).map(([key, entry]) => [key, cleanInput(entry, secret, ancestors)]),
+				)) as T;
+	} finally {
+		ancestors.delete(value);
+	}
+}
 function field(value: unknown, key: string): unknown {
 	return value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined;
 }

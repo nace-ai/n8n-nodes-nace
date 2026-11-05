@@ -1056,6 +1056,59 @@ describe('review regressions', () => {
 			expect(result[0][0].binary).toEqual(includeOtherFields ? imageItem.binary : undefined);
 		},
 	);
+	it.each([false, true])(
+		'preserves shared input values and redacts nested strings (continue=%s)',
+		async (continued) => {
+			const secret = 'synthetic-input-key';
+			const shared = { name: 'Customer', nested: [{ note: `Key: ${secret}` }] };
+			const createdAt = new Date('2026-11-06T00:00:00Z');
+			const bytes = Buffer.from([1, 2, 3]);
+			class Customer {
+				name = 'Customer';
+			}
+			const customerRecord = new Customer();
+			const input = {
+				customer: shared,
+				billingCustomer: shared,
+				createdAt,
+				bytes,
+				customerRecord,
+			};
+			const f = fake({ options: { includeOtherFields: true } }, { apiKey: secret }, [
+				{ json: input as unknown as IDataObject },
+			]);
+			if (continued) {
+				f.raw.continueOnFail = () => true;
+				f.http.mockResolvedValue(response({}, 422));
+			}
+			const result = (await f.run())[0][0].json;
+			const expected = { name: 'Customer', nested: [{ note: 'Key: [REDACTED]' }] };
+			expect(result.customer).toEqual(expected);
+			expect(result.billingCustomer).toEqual(expected);
+			expect(result.createdAt).toBe(createdAt);
+			expect(result.bytes).toBe(bytes);
+			expect(result.customerRecord).toBe(customerRecord);
+			expect(shared.nested[0].note).toBe(`Key: ${secret}`);
+			assertSecretAbsent(result, secret);
+		},
+	);
+	it.each([false, true])(
+		'handles actual input cycles without losing later references (continue=%s)',
+		async (continued) => {
+			const customer: IDataObject = { name: 'Customer' };
+			customer.self = customer;
+			const input = { customer, billingCustomer: customer };
+			const f = fake({ options: { includeOtherFields: true } }, {}, [{ json: input }]);
+			if (continued) {
+				f.raw.continueOnFail = () => true;
+				f.http.mockResolvedValue(response({}, 422));
+			}
+			const result = (await f.run())[0][0].json;
+			expect(result.customer).toEqual({ name: 'Customer', self: null });
+			expect(result.billingCustomer).toEqual({ name: 'Customer', self: null });
+			expect(customer.self).toBe(customer);
+		},
+	);
 	it.each([
 		{ headers: { 'retry-after-ms': '1000000000' }, wait: 60000, calls: 3 },
 		{ headers: { 'retry-after': '1000000' }, wait: 60000, calls: 3 },
@@ -1916,6 +1969,23 @@ describe('security review round one', () => {
 		expect(f.raw.helpers.getBinaryDataBuffer).toHaveBeenCalledTimes(1);
 		expect(f.http).not.toHaveBeenCalled();
 	});
+	it.each([undefined, '1 B'])(
+		'checks actual image bytes before encoding when fileSize=%s',
+		async (fileSize) => {
+			const oversized = Buffer.alloc(16 * 1024 * 1024 + 1);
+			const encode = vi.spyOn(oversized, 'toString');
+			const f = fake(
+				{ model: 'drex-max', imageProperties: 'red,blue' },
+				{},
+				[{ ...imageItem, binary: { ...imageItem.binary, red: { ...imageItem.binary.red, fileSize } } }],
+				{ red: oversized, blue },
+			);
+			await expect(f.run()).rejects.toThrow('Image red exceeds the 16 MiB limit');
+			expect(f.raw.helpers.getBinaryDataBuffer).toHaveBeenCalledTimes(1);
+			expect(encode).not.toHaveBeenCalled();
+			expect(f.http).not.toHaveBeenCalled();
+		},
+	);
 	it.each(['nace', 'openrouter'])('uses the correct 402 billing URL for %s', async (backend) => {
 		const f = fake({}, { backend });
 		f.http.mockResolvedValue({ statusCode: 402, headers: {}, body: {} });
@@ -1983,7 +2053,8 @@ describe('security review round one', () => {
 		expect(ci).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0');
 		const [build, release] = publish.split('\n  publish:');
 		expect(build).not.toContain('id-token: write');
-		expect(build).toContain('npm ci');
+		expect(ci).toContain('npm ci --ignore-scripts');
+		expect(build).toContain('npm ci --ignore-scripts');
 		expect(build).toContain('npm run lint');
 		expect(build).toContain('npm test');
 		expect(build).toContain('npm run build');

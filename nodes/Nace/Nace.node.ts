@@ -10,7 +10,7 @@ import { getModels, request } from './api';
 import { properties } from './properties';
 import { attachImages } from './images';
 import { validateAnswers } from './response';
-import { cleanJson, operationFailure, unexpected } from './safety';
+import { cleanInput, cleanJson, operationFailure, unexpected } from './safety';
 import { buildQuestions, choices, fail, parse } from './questions';
 import type { Choice, Questions } from './questions';
 
@@ -172,10 +172,10 @@ export class Nace implements INodeType {
 						]),
 					);
 				outputs[isTool ? 0 : target].push({
-					json: cleanJson(
-						{ ...(options.includeOtherFields ? item.json : {}), ...fields },
-						secret,
-					) as IDataObject,
+					json: {
+						...(options.includeOtherFields ? cleanInput(item.json, secret) : {}),
+						...(cleanJson(fields, secret) as IDataObject),
+					},
 					...(options.includeOtherFields && item.binary ? { binary: item.binary } : {}),
 					pairedItem: { item: index },
 				});
@@ -184,7 +184,7 @@ export class Nace implements INodeType {
 				if (!this.continueOnFail()) throw failure;
 				outputs[!isTool && isRoute ? configuredLabels.length : 0].push({
 					json: {
-						...(options.includeOtherFields ? (cleanJson(item.json, secret) as IDataObject) : {}),
+						...(options.includeOtherFields ? cleanInput(item.json, secret) : {}),
 						error: failure.message,
 						description: 'description' in failure ? failure.description : undefined,
 					},
