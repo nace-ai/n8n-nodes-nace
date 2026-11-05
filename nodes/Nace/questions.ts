@@ -1,5 +1,6 @@
 import type { IDataObject, IExecuteFunctions } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
+import { itemText } from './safety';
 
 export interface Choice {
 	label: string;
@@ -12,7 +13,7 @@ export interface Question {
 }
 export type Questions = Record<string, Question>;
 export function fail(context: IExecuteFunctions, index: number, message: string): never {
-	throw new NodeOperationError(context.getNode(), message, { itemIndex: index });
+	throw new NodeOperationError(context.getNode(), itemText(message, index), { itemIndex: index });
 }
 export function parse(
 	context: IExecuteFunctions,
@@ -28,10 +29,10 @@ export function parse(
 	}
 }
 export function choices(context: IExecuteFunctions, index: number, entries: Choice[]): IDataObject {
-	if (!entries.length) fail(context, index, 'Add at least one choice label');
+	if (!entries.length) fail(context, index, 'Labels / Choices: Add at least one choice label');
 	const labels = entries.map((entry) => String(entry.label || '').trim());
 	if (labels.some((label) => !label) || new Set(labels).size !== labels.length)
-		fail(context, index, 'Choice labels must be nonempty and unique');
+		fail(context, index, 'Labels / Choices: Choice labels must be nonempty and unique');
 	return Object.fromEntries(entries.map((entry, i) => [labels[i], entry.description || null]));
 }
 export function buildQuestions(
@@ -44,12 +45,12 @@ export function buildQuestions(
 		context.getNodeParameter(name, index, fallback as string);
 	let raw: unknown;
 	if (operation === 'evaluate' && param('questionsMode', 'ui') === 'json') {
-		raw = parse(context, index, param('questionsJson', '{}'), 'Questions');
+		raw = parse(context, index, param('questionsJson', '{}'), 'Questions (JSON)');
 	} else if (operation === 'evaluate') {
 		const entries = param('questions.question', []) as IDataObject[];
 		const ids = entries.map((entry) => String(entry.id || '').trim());
 		if (ids.some((id) => !id) || new Set(ids).size !== ids.length)
-			fail(context, index, 'Question IDs must be nonempty and unique');
+			fail(context, index, 'Questions: Question IDs must be nonempty and unique');
 		raw = Object.fromEntries(
 			entries.map((entry, i) => [
 				ids[i],
@@ -90,16 +91,16 @@ export function buildQuestions(
 		fail(context, index, 'Questions must be an object keyed by question ID');
 	const entries = Object.entries(raw);
 	if (entries.length < 1 || entries.length > 512)
-		fail(context, index, 'Provide between 1 and 512 questions');
+		fail(context, index, 'Questions: Provide between 1 and 512 questions');
 	return Object.fromEntries(
 		entries.map(([id, value]) => {
 			if (!id.trim() || !value || typeof value !== 'object' || Array.isArray(value))
-				fail(context, index, `Invalid question: ${id}`);
+				fail(context, index, `Questions: Invalid question: ${id}`);
 			const question = value as Question;
 			if (!['noul', 'choice', 'score'].includes(question.type))
-				fail(context, index, `Question ${id}: type must be noul, choice, or score`);
+				fail(context, index, `Questions: Question ${id}: type must be noul, choice, or score`);
 			if (question.instructions != null && typeof question.instructions !== 'string')
-				fail(context, index, `Question ${id}: instructions must be a string`);
+				fail(context, index, `Questions: Question ${id}: instructions must be a string`);
 			let criteria = question.criteria ?? (question.type === 'noul' ? {} : undefined);
 			if (question.type === 'score') {
 				if (
@@ -110,11 +111,11 @@ export function buildQuestions(
 					fail(
 						context,
 						index,
-						`Question ${id}: score criteria must be a nonempty array of level descriptions ordered low to high`,
+						`Questions: Question ${id}: score criteria must be a nonempty array of level descriptions ordered low to high`,
 					);
 			} else {
 				if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria))
-					fail(context, index, `Question ${id}: criteria must be an object`);
+					fail(context, index, `Questions: Question ${id}: criteria must be an object`);
 				const values = Object.entries(criteria);
 				if (
 					question.type === 'choice' &&
@@ -127,7 +128,7 @@ export function buildQuestions(
 					fail(
 						context,
 						index,
-						`Question ${id}: choice criteria must map labels to descriptions or null`,
+						`Questions: Question ${id}: choice criteria must map labels to descriptions or null`,
 					);
 				if (
 					question.type === 'noul' &&
@@ -138,7 +139,7 @@ export function buildQuestions(
 					fail(
 						context,
 						index,
-						`Question ${id}: noul criteria may contain true and false meanings as strings`,
+						`Questions: Question ${id}: noul criteria may contain true and false meanings as strings`,
 					);
 				if (question.type === 'choice')
 					criteria = Object.fromEntries(

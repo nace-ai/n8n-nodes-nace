@@ -5,11 +5,14 @@ import type {
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
-import { NodeApiError, NodeConnectionTypes, NodeOperationError } from 'n8n-workflow';
+import { NodeConnectionTypes } from 'n8n-workflow';
 import { getModels, request } from './api';
 import { properties } from './properties';
+import { attachImages } from './images';
+import { validateAnswers } from './response';
+import { cleanInput, cleanJson, operationFailure, unexpected } from './safety';
 import { buildQuestions, choices, fail, parse } from './questions';
-import type { Choice } from './questions';
+import type { Choice, Questions } from './questions';
 
 export class Nace implements INodeType {
 	description: INodeTypeDescription = {
@@ -48,30 +51,43 @@ export class Nace implements INodeType {
 			let options: IDataObject = {
 				includeOtherFields: (node.parameters.options as IDataObject)?.includeOtherFields === true,
 			};
+			let secret = '';
 			try {
+				const credentials = await this.getCredentials('naceApi');
+				secret = String(credentials.apiKey || '');
+				const openRouter = credentials.backend === 'openrouter';
 				const operation = this.getNodeParameter('operation', index, 'evaluate') as string;
 				options = this.getNodeParameter('options', index, {}) as IDataObject;
 				const labels = isRoute
 					? (this.getNodeParameter('labels.label', index, []) as Choice[])
 					: [];
 				if (isRoute) {
-					if (!configuredLabels.length) fail(this, index, 'Route requires at least one label');
+					if (!configuredLabels.length)
+						fail(this, index, 'Labels: Route requires at least one label');
 					if (configuredLabels.some((entry) => String(entry.label).startsWith('=')))
-						fail(this, index, 'Route label names must be fixed values, not expressions');
+						fail(this, index, 'Labels: Route label names must be fixed values, not expressions');
 					if (
 						labels.length !== configuredLabels.length ||
 						labels.some((entry, i) => entry.label !== configuredLabels[i].label)
 					)
-						fail(this, index, 'Route label names must stay fixed across input items');
+						fail(this, index, 'Labels: Route label names must stay fixed across input items');
+					if (labels.some((entry) => entry.label.trim().toLowerCase() === 'unsure'))
+						fail(this, index, 'Labels: Route label Unsure is reserved for the final Unsure output');
 					choices(this, index, labels);
 				}
 				const model = this.getNodeParameter('model', index, 'drex-v2.0') as string;
+				if (openRouter && !model.startsWith('nace-ai/'))
+					fail(
+						this,
+						index,
+						`Model Name or ID: OpenRouter models must start with nace-ai/. Try nace-ai/${model}.`,
+					);
 				const format = this.getNodeParameter('stateFormat', index, 'text');
 				const state =
 					format === 'inputItem'
 						? item.json
 						: format === 'json'
-							? parse(this, index, this.getNodeParameter('stateJson', index, '{}'), 'State')
+							? parse(this, index, this.getNodeParameter('stateJson', index, '{}'), 'State (JSON)')
 							: this.getNodeParameter('stateText', index, '');
 				const body: IDataObject = {
 					model,
@@ -87,8 +103,6 @@ export class Nace implements INodeType {
 					.split(',')
 					.map((name) => name.trim())
 					.filter(Boolean);
-				const credentials = await this.getCredentials('naceApi');
-				const openRouter = credentials.backend === 'openrouter';
 				if (
 					imageNames.length &&
 					(!model.includes('drex-max') || (openRouter && !model.startsWith('nace-ai/drex-max')))
@@ -96,40 +110,13 @@ export class Nace implements INodeType {
 					fail(
 						this,
 						index,
-						'Images require a drex-max model (nace-ai/drex-max on OpenRouter). Select a Max model or remove the image properties.',
+						'Image Binary Properties: Images require a drex-max model (nace-ai/drex-max on OpenRouter). Select a Max model or remove the image properties.',
 					);
-				if (imageNames.length > 8) fail(this, index, 'At most 8 images are allowed per request');
-				const images: string[] = [];
-				let total = 0;
-				for (const name of imageNames) {
-					const binary = this.helpers.assertBinaryData(index, name);
-					if (!['image/png', 'image/jpeg', 'image/webp'].includes(binary.mimeType))
-						fail(this, index, `Image ${name}: only PNG, JPEG, or WebP is supported`);
-					const buffer = await this.helpers.getBinaryDataBuffer(index, name);
-					if (buffer.length > 16 * 1024 * 1024)
-						fail(this, index, `Image ${name} exceeds the 16 MiB limit`);
-					total += buffer.length;
-					if (total > 32 * 1024 * 1024) fail(this, index, 'Images exceed the 32 MiB total limit');
-					images.push(`data:${binary.mimeType};base64,${buffer.toString('base64')}`);
-				}
-				if (images.length) {
-					if (openRouter)
-						body.state = [
-							{ type: 'text', text: typeof state === 'string' ? state : JSON.stringify(state) },
-							...images.map((url) => ({ type: 'image_url', image_url: { url } })),
-						];
-					else body.images = images;
-				}
-				if (Buffer.byteLength(JSON.stringify(body), 'utf8') >= 4 * 1024 * 1024)
-					fail(
-						this,
-						index,
-						'JSON request body must be smaller than 4 MiB, including base64 images. Resize images or shorten the state.',
-					);
+				await attachImages(this, index, body, imageNames, openRouter);
 				const timeout = Number(options.timeout ?? 60000);
-				const retries = Number(options.maxRetries ?? 3);
+				const retries = Number(options.maxRetries ?? 5);
 				if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(retries))
-					fail(this, index, 'Timeout must be positive and max retries must be a finite number');
+					fail(this, index, 'Timeout must be positive and Max Retries must be a finite number');
 				const response = await request(
 					this,
 					'POST',
@@ -138,23 +125,38 @@ export class Nace implements INodeType {
 					Math.min(10, Math.max(0, Math.floor(retries))),
 					index,
 				);
-				const answers = response.answers as Record<string, IDataObject> | undefined;
-				if (!answers || typeof answers !== 'object' || Array.isArray(answers))
-					fail(this, index, 'Drex returned no answers');
+				const answers = validateAnswers(
+					this.getNode(),
+					secret,
+					openRouter ? 'OpenRouter' : 'Nace',
+					body.questions as unknown as Questions,
+					response,
+					index,
+				);
 				let target = 0;
 				if (operation === 'route') {
 					const answer = answers.route;
 					if (!answer || typeof answer.confidence !== 'number')
-						fail(this, index, 'Drex returned no valid route answer');
+						throw unexpected(
+							this.getNode(),
+							secret,
+							openRouter ? 'OpenRouter' : 'Nace',
+							'Questions: Question route: confidence is required for routing',
+							index,
+						);
 					const threshold = Number(this.getNodeParameter('confidenceThreshold', index, 0.5));
 					if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1)
-						fail(this, index, 'Confidence threshold must be between 0 and 1');
+						fail(this, index, 'Confidence Threshold must be between 0 and 1');
 					target =
 						answer.confidence < threshold
 							? labels.length
 							: labels.findIndex((label) => label.label.trim() === answer.choice);
 					if (target < 0)
-						fail(this, index, `Drex returned an unconfigured route label: ${answer.choice}`);
+						fail(
+							this,
+							index,
+							`Labels: Drex returned an unconfigured route label: ${answer.choice}`,
+						);
 				}
 				const fields: IDataObject = { ...response };
 				if (isRoute)
@@ -170,19 +172,19 @@ export class Nace implements INodeType {
 						]),
 					);
 				outputs[isTool ? 0 : target].push({
-					json: { ...(options.includeOtherFields ? item.json : {}), ...fields },
+					json: {
+						...(options.includeOtherFields ? cleanInput(item.json, secret) : {}),
+						...(cleanJson(fields, secret) as IDataObject),
+					},
 					...(options.includeOtherFields && item.binary ? { binary: item.binary } : {}),
 					pairedItem: { item: index },
 				});
 			} catch (error) {
-				const failure =
-					error instanceof NodeApiError || error instanceof NodeOperationError
-						? error
-						: new NodeOperationError(this.getNode(), error as Error, { itemIndex: index });
+				const failure = operationFailure(this.getNode(), secret, error, index);
 				if (!this.continueOnFail()) throw failure;
 				outputs[!isTool && isRoute ? configuredLabels.length : 0].push({
 					json: {
-						...(options.includeOtherFields ? item.json : {}),
+						...(options.includeOtherFields ? cleanInput(item.json, secret) : {}),
 						error: failure.message,
 						description: 'description' in failure ? failure.description : undefined,
 					},

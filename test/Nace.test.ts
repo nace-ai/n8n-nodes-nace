@@ -65,14 +65,36 @@ function fake(
 ) {
 	const values: Record<string, unknown> = {
 		operation: 'evaluate',
-		model: 'drex-v2.0',
+		model:
+			(credentials as IDataObject).backend === 'openrouter' ? 'nace-ai/drex-v2.0' : 'drex-v2.0',
 		stateFormat: 'text',
 		stateText: 'Synthetic text',
 		questionsMode: 'json',
 		questionsJson: JSON.stringify({ approved: noul }),
 		...params,
 	};
-	const http = vi.fn().mockResolvedValue(response());
+	const http = vi.fn().mockImplementation(async (_credential, options) => {
+		const questions = options.body?.questions || {};
+		const answers = Object.fromEntries(
+			Object.entries(questions).map(([id, raw]) => {
+				const question = raw as { type: string; criteria: IDataObject | string[] };
+				return [
+					id,
+					question.type === 'noul'
+						? answerSet.noul
+						: question.type === 'score'
+							? answerSet.score
+							: {
+									...answerSet.choice,
+									choice: Object.keys(question.criteria).includes('support')
+										? 'support'
+										: Object.keys(question.criteria)[0],
+								},
+				];
+			}),
+		);
+		return response(answers);
+	});
 	const context = {
 		getInputData: () => items,
 		getNode: () => ({
@@ -117,15 +139,77 @@ function fake(
 		run: () => new Nace().execute.call(context as unknown as IExecuteFunctions),
 	};
 }
+async function credentialCheck(
+	credentials: object,
+	http = vi.fn().mockResolvedValue({ statusCode: 200, headers: {}, body: {} }),
+) {
+	const credential = new NaceApi();
+	const data = {
+		backend: 'nace',
+		baseUrl: 'https://console.nace.ai',
+		openRouterBaseUrl: 'https://openrouter.ai/api',
+		...credentials,
+	};
+	const test = credential.test.request;
+	try {
+		const headers = Object.fromEntries(
+			Object.entries(test.headers || {}).map(([key, value]) => [
+				key,
+				typeof value === 'string' && value.startsWith('=')
+					? evaluateMetadata(value, {}, data)
+					: value,
+			]),
+		);
+		const options = await credential.authenticate(data, {
+			...test,
+			baseURL: evaluateMetadata(test.baseURL as string, {}, data),
+			url: evaluateMetadata(test.url as string, {}, data),
+			headers,
+		});
+		const response = await http({ ...options, uri: options.baseURL + options.url });
+		return {
+			result: {
+				status: response.statusCode < 300 ? 'OK' : 'Error',
+				message: `n8n HTTP status ${response.statusCode}`,
+			},
+			http,
+		};
+	} catch (caught) {
+		return {
+			result: {
+				status: 'Error',
+				message: caught instanceof Error ? caught.message : 'n8n credential test status',
+			},
+			http,
+		};
+	}
+}
+function assertSecretAbsent(value: unknown, secret: string, seen = new WeakSet<object>()) {
+	if (typeof value === 'string') {
+		expect(value).not.toContain(secret);
+		return;
+	}
+	if (
+		!value ||
+		(typeof value !== 'object' && typeof value !== 'function') ||
+		seen.has(value as object)
+	)
+		return;
+	seen.add(value as object);
+	for (const key of Object.getOwnPropertyNames(value)) {
+		expect(key).not.toContain(secret);
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (descriptor && 'value' in descriptor) assertSecretAbsent(descriptor.value, secret, seen);
+	}
+}
 function body(http: ReturnType<typeof vi.fn>, call = 0) {
 	return http.mock.calls[call][1].body;
 }
 function evaluateMetadata(expression: string, parameters: object = {}, credentials: object = {}) {
-	// eslint-disable-next-line @n8n/community-nodes/no-dangerous-functions -- Test evaluates only package-owned metadata expressions, without user code.
-	return new Function('$parameter', '$credentials', `return ${expression.slice(3, -2)}`)(
-		parameters,
-		credentials,
-	);
+	return new Expression('UTC').resolveSimpleParameterValue(expression, {
+		$parameter: parameters,
+		$credentials: credentials,
+	} as never);
 }
 // Generate actual 1x1 RGB PNGs with valid chunk CRCs, using only Node built-ins.
 function png(red: number, green: number, blue: number) {
@@ -252,6 +336,7 @@ describe('typed evaluation', () => {
 	});
 	it('supports JSON state, whole input and simplify with other input fields', async () => {
 		const f = fake({
+			questionsJson: { noul, choice, score },
 			stateFormat: 'json',
 			stateJson: '{"sample":true}',
 			options: { simplify: true, includeOtherFields: true },
@@ -310,7 +395,17 @@ describe('images and limits', () => {
 		],
 		['body bytes', '4 MiB', 'red', { red: Buffer.alloc(3 * 1024 * 1024) }],
 	] as const)('rejects %s before HTTP', async (_label, error, imageProperties, buffers) => {
-		const f = fake({ model: 'drex-max', imageProperties }, {}, [imageItem], buffers);
+		const fixture =
+			_label === 'total bytes'
+				? {
+						...imageItem,
+						binary: {
+							red: { ...imageItem.binary.red, fileSize: '16 MiB' },
+							blue: { ...imageItem.binary.blue, fileSize: '16 MiB' },
+						},
+					}
+				: imageItem;
+		const f = fake({ model: 'drex-max', imageProperties }, {}, [fixture], buffers);
 		await expect(f.run()).rejects.toThrow(error);
 		expect(f.http).not.toHaveBeenCalled();
 	});
@@ -373,9 +468,7 @@ describe('errors, retries, and routing', () => {
 			headers: {},
 			body: { error: { message: 'No' }, request_id: 'id' },
 		});
-		await expect(f.run()).rejects.toThrow(
-			status === 401 ? 'Invalid API key' : 'https://console.nace.ai',
-		);
+		await expect(f.run()).rejects.toThrow(status === 401 ? 'API Key' : 'https://console.nace.ai');
 	});
 	it.each([429, 529])('honours retry-after-ms for %s', async (status) => {
 		vi.useFakeTimers();
@@ -393,7 +486,7 @@ describe('errors, retries, and routing', () => {
 	});
 	it.each([
 		{ headers: { 'retry-after': '2' }, delay: 2000 },
-		{ headers: {}, delay: 1000 },
+		{ headers: {}, delay: 2000 },
 	])('falls back to seconds or exponential backoff', async ({ headers, delay }) => {
 		vi.useFakeTimers();
 		const f = fake();
@@ -503,8 +596,9 @@ describe('credentials, models, and attribution', () => {
 			url: 'https://console.nace.ai/v1/models',
 			headers: { 'User-Agent': CLIENT, 'X-Nace-Client': CLIENT },
 		});
+		expect(f.http.mock.calls[0][1]).not.toHaveProperty('qs');
 	});
-	it('uses OpenRouter model IDs rather than human-readable model names', async () => {
+	it('requests all OpenRouter output modalities and displays names while filtering to Nace model IDs', async () => {
 		const f = fake(
 			{},
 			{
@@ -518,17 +612,40 @@ describe('credentials, models, and attribution', () => {
 			headers: {},
 			body: {
 				data: [
-					{ id: 'nace-ai/drex-max', name: 'Nace: Drex Max' },
-					{ id: 'nace-ai/drex-v2.0', name: 'Nace: Drex V2' },
+					{
+						id: 'nace-ai/drex-max',
+						name: 'Nace.AI: Drex Max',
+						description: 'Drex decisions with images',
+					},
+					{
+						id: 'nace-ai/drex-v2.0',
+						name: 'Nace.AI: Drex v2.0',
+						description: 'Fast text decisions',
+					},
+					{ id: 'nace-ai/drex-v1.5' },
 					{ id: 'other-vendor/model', name: 'Another model' },
 					{ id: 'nace-ai/retired', name: 'Old Drex', retired: true },
 				],
 			},
 		});
-		expect((await getModels.call(f.context as never)).map((m) => m.value)).toEqual([
-			'nace-ai/drex-max',
-			'nace-ai/drex-v2.0',
+		expect(await getModels.call(f.context as never)).toEqual([
+			{
+				name: 'Nace.AI: Drex Max',
+				value: 'nace-ai/drex-max',
+				description: 'Drex decisions with images',
+			},
+			{
+				name: 'Nace.AI: Drex v2.0',
+				value: 'nace-ai/drex-v2.0',
+				description: 'Fast text decisions',
+			},
+			{ name: 'nace-ai/drex-v1.5', value: 'nace-ai/drex-v1.5', description: '' },
 		]);
+		expect(f.http.mock.calls[0][1]).toMatchObject({
+			method: 'GET',
+			url: 'https://openrouter.ai/api/v1/models',
+			qs: { output_modalities: 'all' },
+		});
 		expect(f.http.mock.calls[0][1].headers).toMatchObject({
 			'HTTP-Referer': 'https://nace.ai',
 			'X-OpenRouter-Title': 'Drex for n8n',
@@ -564,8 +681,19 @@ describe('credentials, models, and attribution', () => {
 			['baseUrl', 'string', 'https://console.nace.ai'],
 			['openRouterBaseUrl', 'string', 'https://openrouter.ai/api'],
 		]);
-		expect(credential.test.request).toMatchObject({
-			url: expect.stringContaining('/v1/key'),
+		expect(new Nace().description.credentials).toContainEqual({
+			name: 'naceApi',
+			required: true,
+		});
+		expect('test' in credential).toBe(true);
+		const check = await credentialCheck({
+			backend: 'nace',
+			apiKey: 'synthetic',
+			baseUrl: 'https://console.nace.ai',
+		});
+		expect(check.result.status).toBe('OK');
+		expect(check.http.mock.calls[0][0]).toMatchObject({
+			uri: 'https://console.nace.ai/v1/models',
 			headers: { 'User-Agent': CLIENT, 'X-Nace-Client': CLIENT },
 		});
 	});
@@ -663,10 +791,10 @@ describe('review regressions', () => {
 			f.http.mockResolvedValue({ statusCode: 200, headers: {}, body: { models: [] } });
 			await getModels.call(f.context as never);
 			expect(f.http.mock.calls[1][1].url).toBe(`${expectedBase}/v1/models`);
-			const test = new NaceApi().test.request;
-			expect(evaluateMetadata(test.baseURL as string, {}, credentials)).toBe(expectedBase);
-			expect(evaluateMetadata(test.url as string, {}, credentials)).toBe(
-				backend === 'nace' ? '/v1/models' : '/v1/key',
+			const check = await credentialCheck(credentials);
+			expect(check.result.status).toBe('OK');
+			expect(check.http.mock.calls[0][0].uri).toBe(
+				`${expectedBase}${backend === 'nace' ? '/v1/models' : '/v1/key'}`,
 			);
 		},
 	);
@@ -677,14 +805,12 @@ describe('review regressions', () => {
 		);
 		await f.run();
 		expect(f.http.mock.calls[0][1].url).toBe('https://openrouter.ai/api/v1/systemone');
-		const request = new NaceApi().test.request;
-		expect(
-			evaluateMetadata(
-				request.baseURL as string,
-				{},
-				{ backend: 'openrouter', baseUrl: 'https://console.nace.ai' },
-			),
-		).toBe('https://openrouter.ai/api');
+		const check = await credentialCheck({
+			backend: 'openrouter',
+			baseUrl: 'https://console.nace.ai',
+		});
+		expect(check.result.status).toBe('OK');
+		expect(check.http.mock.calls[0][0].uri).toBe('https://openrouter.ai/api/v1/key');
 	});
 	it('always exposes Unsure and fixes only Route label names while allowing description expressions', () => {
 		const properties = new Nace().description.properties;
@@ -712,7 +838,7 @@ describe('review regressions', () => {
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
 		expect(result[0][0]).toMatchObject({
-			json: { error: 'Route requires at least one label' },
+			json: { error: 'Labels: Route requires at least one label [Item 1]' },
 			pairedItem: { item: 0 },
 		});
 	});
@@ -737,7 +863,7 @@ describe('review regressions', () => {
 			f.http.mockResolvedValue(response({ route: answerSet.choice }));
 			const result = await f.run();
 			expect(result[1][0]).toMatchObject({
-				json: { error: `${path} expression failed` },
+				json: { error: `${path} expression failed [Item 1]` },
 				pairedItem: { item: 0 },
 			});
 			expect(result[0][0].pairedItem).toEqual({ item: 1 });
@@ -872,16 +998,16 @@ describe('review regressions', () => {
 			});
 			if (continued) {
 				const result = await f.run();
-				expect(JSON.stringify(result)).not.toContain(syntheticCredential);
+				assertSecretAbsent(result, syntheticCredential);
 				expect(result[0][0].json).toMatchObject({
-					error: 'Bad request with [REDACTED]',
+					error: 'Bad request with [REDACTED] [Item 1]',
 					description: expect.stringContaining('questions.[REDACTED]: Rejected [REDACTED]'),
 				});
 			} else {
 				await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
-					expect(error.message).toBe('Bad request with [REDACTED]');
+					expect(error.message).toBe('Bad request with [REDACTED] [Item 1]');
 					expect(error.description).toContain('questions.[REDACTED]: Rejected [REDACTED]');
-					expect(JSON.stringify(error)).not.toContain(syntheticCredential);
+					assertSecretAbsent(error, syntheticCredential);
 					return true;
 				});
 			}
@@ -899,7 +1025,7 @@ describe('review regressions', () => {
 		f.http.mockRejectedValue(error);
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
-		expect(JSON.stringify(result)).not.toContain(syntheticCredential);
+		assertSecretAbsent(result, syntheticCredential);
 		expect(result[0][0].json.error).toContain('[REDACTED]');
 	});
 	it('preserves configured input fields and binaries even when options resolution fails', async () => {
@@ -914,7 +1040,7 @@ describe('review regressions', () => {
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
 		expect(result[0][0]).toMatchObject({
-			json: { original: true, error: 'Invalid timeout expression' },
+			json: { original: true, error: 'Invalid timeout expression [Item 1]' },
 			binary: imageItem.binary,
 			pairedItem: { item: 0 },
 		});
@@ -928,6 +1054,59 @@ describe('review regressions', () => {
 			f.raw.continueOnFail = () => true;
 			const result = await f.run();
 			expect(result[0][0].binary).toEqual(includeOtherFields ? imageItem.binary : undefined);
+		},
+	);
+	it.each([false, true])(
+		'preserves shared input values and redacts nested strings (continue=%s)',
+		async (continued) => {
+			const secret = 'synthetic-input-key';
+			const shared = { name: 'Customer', nested: [{ note: `Key: ${secret}` }] };
+			const createdAt = new Date('2026-11-06T00:00:00Z');
+			const bytes = Buffer.from([1, 2, 3]);
+			class Customer {
+				name = 'Customer';
+			}
+			const customerRecord = new Customer();
+			const input = {
+				customer: shared,
+				billingCustomer: shared,
+				createdAt,
+				bytes,
+				customerRecord,
+			};
+			const f = fake({ options: { includeOtherFields: true } }, { apiKey: secret }, [
+				{ json: input as unknown as IDataObject },
+			]);
+			if (continued) {
+				f.raw.continueOnFail = () => true;
+				f.http.mockResolvedValue(response({}, 422));
+			}
+			const result = (await f.run())[0][0].json;
+			const expected = { name: 'Customer', nested: [{ note: 'Key: [REDACTED]' }] };
+			expect(result.customer).toEqual(expected);
+			expect(result.billingCustomer).toEqual(expected);
+			expect(result.createdAt).toBe(createdAt);
+			expect(result.bytes).toBe(bytes);
+			expect(result.customerRecord).toBe(customerRecord);
+			expect(shared.nested[0].note).toBe(`Key: ${secret}`);
+			assertSecretAbsent(result, secret);
+		},
+	);
+	it.each([false, true])(
+		'handles actual input cycles without losing later references (continue=%s)',
+		async (continued) => {
+			const customer: IDataObject = { name: 'Customer' };
+			customer.self = customer;
+			const input = { customer, billingCustomer: customer };
+			const f = fake({ options: { includeOtherFields: true } }, {}, [{ json: input }]);
+			if (continued) {
+				f.raw.continueOnFail = () => true;
+				f.http.mockResolvedValue(response({}, 422));
+			}
+			const result = (await f.run())[0][0].json;
+			expect(result.customer).toEqual({ name: 'Customer', self: null });
+			expect(result.billingCustomer).toEqual({ name: 'Customer', self: null });
+			expect(customer.self).toBe(customer);
 		},
 	);
 	it.each([
@@ -1010,20 +1189,16 @@ describe('backend and permanent Unsure regressions', () => {
 			const expectedMessage =
 				credentials.backend === 'nace'
 					? 'Nace Base URL must not use an openrouter.ai host'
-					: 'OpenRouter Base URL must use openrouter.ai or a subdomain of openrouter.ai';
+					: credentials.openRouterBaseUrl.includes('@')
+						? 'Base URL must not include userinfo'
+						: 'OpenRouter Base URL must use openrouter.ai or a subdomain of openrouter.ai';
 			await expect(f.run()).rejects.toBeInstanceOf(NodeOperationError);
 			await expect(f.run()).rejects.toThrow(expectedMessage);
 			await expect(getModels.call(f.context as never)).rejects.toThrow(expectedMessage);
-			const credential = new NaceApi();
-			const testBaseUrl = evaluateMetadata(
-				credential.test.request.baseURL as string,
-				{},
-				credentials,
-			);
-			const testPath = evaluateMetadata(credential.test.request.url as string, {}, credentials);
-			await expect(
-				credential.authenticate(credentials, { url: testBaseUrl + testPath, method: 'GET' }),
-			).rejects.toBeInstanceOf(NodeOperationError);
+			const check = await credentialCheck(credentials);
+			expect(check.result.status).toBe('Error');
+			expect(check.http).not.toHaveBeenCalled();
+			expect(check.result.message).toContain('Base URL');
 			expect(f.http).not.toHaveBeenCalled();
 		},
 	);
@@ -1053,8 +1228,10 @@ describe('backend and permanent Unsure regressions', () => {
 			await f.run();
 			expect(f.http.mock.calls[0][1].url).toBe(`${expected}/v1/systemone`);
 			const credential = new NaceApi();
-			expect(evaluateMetadata(credential.test.request.baseURL as string, {}, credentials)).toBe(
-				expected,
+			const check = await credentialCheck(credentials);
+			expect(check.result.status).toBe('OK');
+			expect(check.http.mock.calls[0][0].uri).toBe(
+				expected + (credentials.backend === 'openrouter' ? '/v1/key' : '/v1/models'),
 			);
 			await expect(
 				credential.authenticate(credentials, { url: expected + '/v1/models', method: 'GET' }),
@@ -1092,9 +1269,10 @@ describe('backend and permanent Unsure regressions', () => {
 			const f = fake({}, credentials);
 			await f.run();
 			expect(f.http.mock.calls[0][1].url).toBe(`${expected}/v1/systemone`);
-			const credential = new NaceApi();
-			expect(evaluateMetadata(credential.test.request.baseURL as string, {}, credentials)).toBe(
-				expected,
+			const check = await credentialCheck(credentials);
+			expect(check.result.status).toBe('OK');
+			expect(check.http.mock.calls[0][0].uri).toBe(
+				expected + (credentials.backend === 'openrouter' ? '/v1/key' : '/v1/models'),
 			);
 		},
 	);
@@ -1169,5 +1347,836 @@ describe('backend and permanent Unsure regressions', () => {
 			answerSet.choice,
 		]);
 		expect(result[0].map((item) => item.pairedItem)).toEqual([{ item: 0 }, { item: 1 }]);
+	});
+});
+
+describe.each(['nace', 'openrouter'])('%s response metadata', (backend) => {
+	const idCases = [
+		{
+			request_id: 'req-body',
+			headers: { 'X-Request-Id': 'req-header' },
+			id: 'gen-dec-body',
+			expected: 'req-body',
+		},
+		{
+			request_id: null,
+			headers: { 'X-Request-Id': 'req-header' },
+			id: 'gen-dec-body',
+			expected: 'req-header',
+		},
+		{
+			request_id: undefined,
+			headers: {},
+			id: 'gen-dec-body',
+			expected: backend === 'openrouter' ? 'gen-dec-body' : undefined,
+		},
+		{
+			request_id: null,
+			headers: {},
+			id: 'gen-dec-body',
+			expected: backend === 'openrouter' ? 'gen-dec-body' : undefined,
+		},
+	];
+	it.each(idCases)(
+		'selects request_id=$expected and preserves usage costs, provider, and score legend',
+		async ({ request_id, headers, id, expected }) => {
+			const f = fake({ questionsJson: { score } }, { backend });
+			const usage = {
+				input_tokens: 17,
+				output_tokens: 4,
+				cost: 0.000017,
+				cost_details: { upstream_inference_cost: 0.000017 },
+			};
+			const legend = backend === 'openrouter' ? { '0': 'Low', '1': 'High' } : ['Low', 'High'];
+			const answer = { ...answerSet.score, legend };
+			f.http.mockResolvedValue(
+				response({ score: answer }, 200, headers, {
+					request_id,
+					id,
+					usage,
+					provider: 'Synthetic provider',
+				}),
+			);
+			const output = (await f.run())[0][0].json;
+			expect(output.request_id).toBe(expected);
+			expect(output.id).toBe(id);
+			expect(output.usage).toEqual(usage);
+			expect(output.provider).toBe('Synthetic provider');
+			expect(output.answers).toEqual({ score: answer });
+			expect(f.http.mock.calls[0][1]).not.toHaveProperty('qs');
+		},
+	);
+	it.each(idCases)(
+		'uses request_id=$expected in API error descriptions',
+		async ({ request_id, headers, id, expected }) => {
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({
+				statusCode: 422,
+				headers,
+				body: {
+					request_id,
+					id,
+					error: {
+						type: 'invalid_request_error',
+						message: 'Invalid decision request',
+						issues: [{ path: 'questions.score', message: 'Invalid criteria' }],
+					},
+				},
+			});
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				if (expected === undefined) expect(error.description).not.toContain('Request ID:');
+				else expect(error.description).toContain(`Request ID: ${expected}`);
+				expect(error.description).toContain('questions.score: Invalid criteria');
+				return true;
+			});
+		},
+	);
+	it('redacts a credential echoed in the generation ID on a continued error', async () => {
+		const syntheticCredential = 'synthetic-metadata-secret';
+		const f = fake({}, { backend, apiKey: syntheticCredential });
+		f.raw.continueOnFail = () => true;
+		f.http.mockResolvedValue({
+			statusCode: 422,
+			headers: {},
+			body: { id: `gen-dec-${syntheticCredential}`, error: { message: 'Invalid request' } },
+		});
+		const result = await f.run();
+		if (backend === 'openrouter')
+			expect(result[0][0].json.description).toContain('Request ID: gen-dec-[REDACTED]');
+		else expect(result[0][0].json.description || '').not.toContain('Request ID:');
+		assertSecretAbsent(result, syntheticCredential);
+	});
+	it('keeps usage costs when Simplify is enabled', async () => {
+		const f = fake({ options: { simplify: true } }, { backend });
+		const usage = { input_tokens: 2, output_tokens: 1, cost: 0.000002 };
+		f.http.mockResolvedValue(
+			response(undefined, 200, {}, { request_id: null, id: 'gen-dec-simple', usage }),
+		);
+		const output = (await f.run())[0][0].json;
+		expect(output.request_id).toBe(backend === 'openrouter' ? 'gen-dec-simple' : undefined);
+		expect(output.usage).toEqual(usage);
+	});
+});
+
+describe.each(['nace', 'openrouter'])('%s response validation and missing IDs', (backend) => {
+	it('accepts a successful response without any ID and omits request_id', async () => {
+		const f = fake({}, { backend });
+		f.http.mockResolvedValue({
+			statusCode: 200,
+			headers: {},
+			body: { answers: { approved: answerSet.noul }, usage: { input_tokens: 1 } },
+		});
+		const output = (await f.run())[0][0].json;
+		expect(output).not.toHaveProperty('request_id');
+		expect(output.answers).toEqual({ approved: answerSet.noul });
+	});
+	it.each([undefined, null, ''])(
+		'reports a clear bodyless 500 error without IDs (body=%s)',
+		async (body) => {
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({ statusCode: 500, headers: {}, body });
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				expect(error.message).toBe('Drex API returned status 500 [Item 1]');
+				expect(error.httpCode).toBe('500');
+				expect(error.description || '').not.toContain('Request ID:');
+				return true;
+			});
+			f.raw.continueOnFail = () => true;
+			const output = (await f.run())[0][0].json;
+			expect(output.error).toBe('Drex API returned status 500 [Item 1]');
+			expect(output).not.toHaveProperty('request_id');
+		},
+	);
+	it.each([undefined, null, 'not-json', 42, false, [], [{ answers: {} }], new Date(0)])(
+		'rejects a non-plain-object 2xx body clearly: %s',
+		async (body) => {
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({
+				statusCode: 200,
+				headers: { 'x-request-id': ['req-header', 'ignored-header'] },
+				body,
+			});
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				expect(error.message).toBe(
+					`Unexpected response from ${backend === 'openrouter' ? 'OpenRouter' : 'Nace'} [Item 1]`,
+				);
+				expect(error.description).toBe('Expected a JSON object in the response body. [Item 1]');
+				return true;
+			});
+		},
+	);
+	const scalarCases = [
+		{ request_id: 0, header: ['req-header'], id: 'gen-dec-body', expected: 0 },
+		{ request_id: 123, header: 'req-header', id: 'gen-dec-body', expected: 123 },
+		{
+			request_id: {},
+			header: ['req-first', 'req-second'],
+			id: 'gen-dec-body',
+			expected: 'req-first',
+		},
+		{
+			request_id: ['invalid-array'],
+			header: 'req-header',
+			id: 'gen-dec-body',
+			expected: 'req-header',
+		},
+		{ request_id: null, header: 0, id: 'gen-dec-body', expected: 0 },
+		{ request_id: null, header: [], id: 456, expected: backend === 'openrouter' ? 456 : undefined },
+		{ request_id: null, header: [], id: 0, expected: backend === 'openrouter' ? 0 : undefined },
+		{
+			request_id: {},
+			header: [{ malformed: true }, 'must-not-use-second'],
+			id: ['invalid-array'],
+			expected: undefined,
+		},
+		{ request_id: ['invalid-array'], header: {}, id: { malformed: true }, expected: undefined },
+		{ request_id: false, header: true, id: false, expected: undefined },
+		{ request_id: NaN, header: Infinity, id: Infinity, expected: undefined },
+	];
+	it.each(scalarCases)(
+		'uses only scalar request IDs and the first header value (expected=$expected)',
+		async ({ request_id, header, id, expected }) => {
+			const f = fake({}, { backend });
+			const body = { answers: { approved: answerSet.noul }, request_id, id };
+			const headers = { 'X-Request-Id': header };
+			f.http.mockResolvedValue({ statusCode: 200, headers, body });
+			const output = (await f.run())[0][0].json;
+			if (expected === undefined) expect(output).not.toHaveProperty('request_id');
+			else expect(output.request_id).toBe(expected);
+			f.http.mockResolvedValue({
+				statusCode: 422,
+				headers,
+				body: { ...body, error: { message: 'Invalid request' } },
+			});
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				if (expected === undefined) expect(error.description || '').not.toContain('Request ID:');
+				else expect(error.description).toContain(`Request ID: ${expected}`);
+				expect(error.description || '').not.toContain('[object Object]');
+				expect(error.description || '').not.toContain('must-not-use-second');
+				return true;
+			});
+		},
+	);
+	it('normalizes IDs on a copy of a frozen plain response body', async () => {
+		const f = fake({}, { backend });
+		const body = Object.freeze({ answers: { approved: answerSet.noul } });
+		f.http.mockResolvedValue({
+			statusCode: 200,
+			headers: { 'x-request-id': ['req-first', 'req-second'] },
+			body,
+		});
+		expect((await f.run())[0][0].json.request_id).toBe('req-first');
+		expect(body).not.toHaveProperty('request_id');
+	});
+});
+
+describe('backend image counts and headerless retries', () => {
+	it.each([
+		{ backend: 'openrouter', count: 4, limit: 4 },
+		{ backend: 'openrouter', count: 5, limit: 4 },
+		{ backend: 'nace', count: 8, limit: 8 },
+		{ backend: 'nace', count: 9, limit: 8 },
+	])('$backend accepts at most $limit images (count=$count)', async ({ backend, count, limit }) => {
+		const names = Array.from({ length: count }, (_, index) => `image${index + 1}`);
+		const binary = Object.fromEntries(
+			names.map((name) => [name, { data: '', mimeType: 'image/png' }]),
+		);
+		const buffers = Object.fromEntries(
+			names.map((name, index) => [name, index % 2 === 0 ? red : blue]),
+		);
+		const f = fake(
+			{
+				model: backend === 'openrouter' ? 'nace-ai/drex-max' : 'drex-max',
+				imageProperties: names.join(','),
+			},
+			{ backend },
+			[{ json: {}, binary }],
+			buffers,
+		);
+		if (count > limit) {
+			await expect(f.run()).rejects.toSatisfy((error: NodeOperationError) => {
+				expect(error).toBeInstanceOf(NodeOperationError);
+				expect(error.message).toContain(backend === 'openrouter' ? 'OpenRouter' : 'Nace');
+				expect(error.message).toContain(`At most ${limit} images`);
+				return true;
+			});
+			expect(f.http).not.toHaveBeenCalled();
+			expect(f.raw.helpers.getBinaryDataBuffer).not.toHaveBeenCalled();
+		} else {
+			await f.run();
+			expect(f.http).toHaveBeenCalledTimes(1);
+			const images =
+				backend === 'openrouter'
+					? body(f.http)
+							.state.slice(1)
+							.map((part: { image_url: { url: string } }) => part.image_url.url)
+					: body(f.http).images;
+			expect(images).toEqual(
+				names.map((name) => `data:image/png;base64,${buffers[name].toString('base64')}`),
+			);
+		}
+	});
+	it('shows five default retries in the node UI', () => {
+		const options = new Nace().description.properties.find(
+			(property) => property.name === 'options',
+		)!;
+		const retries = (options.options as INodeProperties[]).find(
+			(property) => property.name === 'maxRetries',
+		)!;
+		expect(retries.default).toBe(5);
+	});
+	it.each(['nace', 'openrouter'])(
+		'retries headerless 429 responses five times on %s at 2, 4, 8, 16, and 30 seconds',
+		async (backend) => {
+			vi.useFakeTimers();
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({
+				statusCode: 429,
+				headers: {},
+				body: { error: { message: 'Model busy, retry later' } },
+			});
+			const pending = expect(f.run()).rejects.toThrow('Model busy, retry later');
+			await vi.advanceTimersByTimeAsync(0);
+			let calls = 1;
+			for (const delay of [2000, 4000, 8000, 16000, 30000]) {
+				expect(f.http).toHaveBeenCalledTimes(calls);
+				await vi.advanceTimersByTimeAsync(delay - 1);
+				expect(f.http).toHaveBeenCalledTimes(calls);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(f.http).toHaveBeenCalledTimes(++calls);
+			}
+			await pending;
+			expect(f.http).toHaveBeenCalledTimes(6);
+			expect(vi.getTimerCount()).toBe(0);
+		},
+	);
+	it('uses at most one retry for model loading', async () => {
+		vi.useFakeTimers();
+		const f = fake({}, { backend: 'openrouter' });
+		f.http.mockResolvedValue({
+			statusCode: 429,
+			headers: {},
+			body: { error: { message: 'Model busy, retry later' } },
+		});
+		const pending = expect(getModels.call(f.context as never)).rejects.toBeInstanceOf(NodeApiError);
+		await vi.runAllTimersAsync();
+		await pending;
+		expect(f.http).toHaveBeenCalledTimes(2);
+	});
+	it('caps repeated headerless waits at 30 seconds and stops after 120 seconds total sleep', async () => {
+		vi.useFakeTimers();
+		const f = fake({ options: { maxRetries: 10 } }, { backend: 'openrouter' });
+		f.http.mockResolvedValue({
+			statusCode: 429,
+			headers: {},
+			body: { error: { message: 'Model busy, retry later' } },
+		});
+		const pending = expect(f.run()).rejects.toThrow('Model busy, retry later');
+		await vi.advanceTimersByTimeAsync(0);
+		let calls = 1;
+		for (const delay of [2000, 4000, 8000, 16000, 30000, 30000, 30000]) {
+			await vi.advanceTimersByTimeAsync(delay - 1);
+			expect(f.http).toHaveBeenCalledTimes(calls);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(f.http).toHaveBeenCalledTimes(++calls);
+		}
+		await pending;
+		expect(f.http).toHaveBeenCalledTimes(8);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+});
+
+describe('security review round one', () => {
+	it.each([
+		{ backend: 'nace', baseUrl: 'http://console.nace.ai' },
+		{ backend: 'nace', baseUrl: 'http://example.test:8000' },
+		{ backend: 'openrouter', openRouterBaseUrl: 'http://openrouter.ai/api' },
+	])('requires HTTPS on a non-local backend: $backend', async (credentials) => {
+		const f = fake({}, credentials);
+		await expect(f.run()).rejects.toThrow('Base URL must use HTTPS');
+		expect(f.http).not.toHaveBeenCalled();
+		const check = await credentialCheck(credentials);
+		expect(check.result).toMatchObject({
+			status: 'Error',
+			message: expect.stringContaining('HTTPS'),
+		});
+		expect(check.http).not.toHaveBeenCalled();
+	});
+	it.each(['localhost', '127.0.0.1', '[::1]'])('allows local Nace HTTP for %s', async (host) => {
+		const f = fake({}, { baseUrl: `http://${host}:8080/api/` });
+		await f.run();
+		expect(f.http.mock.calls[0][1].url).toBe(`http://${host}:8080/api/v1/systemone`);
+		const check = await credentialCheck({ baseUrl: `http://${host}:8080/api/` });
+		expect(check.result.status).toBe('OK');
+		expect(check.http.mock.calls[0][0].uri).toBe(`http://${host}:8080/api/v1/models`);
+	});
+	it.each(['?debug=1', '?', '#fragment', '#', '/?x=1'])(
+		'rejects URL suffix %s for execution and credential tests',
+		async (suffix) => {
+			for (const backend of ['nace', 'openrouter']) {
+				const credentials = {
+					backend,
+					baseUrl: `https://console.nace.ai${suffix}`,
+					openRouterBaseUrl: `https://openrouter.ai/api${suffix}`,
+				};
+				const f = fake({}, credentials);
+				await expect(f.run()).rejects.toThrow('query, or a fragment');
+				expect(f.http).not.toHaveBeenCalled();
+				const check = await credentialCheck(credentials);
+				expect(check.result.status).toBe('Error');
+				expect(check.http).not.toHaveBeenCalled();
+			}
+		},
+	);
+	it.each(['user:password@', '@'])('rejects userinfo %s without exposing it', async (userinfo) => {
+		const f = fake({}, { baseUrl: `https://${userinfo}console.nace.ai` });
+		await expect(f.run()).rejects.toThrow('userinfo');
+		expect(f.http).not.toHaveBeenCalled();
+	});
+	it('normalizes origins, dot segments, ports, and trailing slashes everywhere', async () => {
+		const credentials = {
+			backend: 'nace',
+			baseUrl: '  https://CONSOLE.NACE.AI:443/first/../api///  ',
+		};
+		const f = fake({}, credentials);
+		await f.run();
+		expect(f.http.mock.calls[0][1].url).toBe('https://console.nace.ai/api/v1/systemone');
+		const check = await credentialCheck(credentials);
+		expect(check.http.mock.calls[0][0].uri).toBe('https://console.nace.ai/api/v1/models');
+	});
+	it.each(['nace', 'openrouter'])(
+		'uses standard declarative credential tests for %s',
+		async (backend) => {
+			const check = await credentialCheck({
+				backend,
+				baseUrl: 'https://console.nace.ai',
+				openRouterBaseUrl: 'https://openrouter.ai/api',
+			});
+			expect(check.result.status).toBe('OK');
+			expect(check.http.mock.calls[0][0]).toMatchObject({
+				uri:
+					backend === 'openrouter'
+						? 'https://openrouter.ai/api/v1/key'
+						: 'https://console.nace.ai/v1/models',
+				disableFollowRedirect: true,
+			});
+			expect('test' in new NaceApi()).toBe(true);
+		},
+	);
+	const syntheticCredential = 'synthetic-key-for-deep-inspection';
+	function axiosError() {
+		const error = Object.assign(new Error(`Proxy echoed ${syntheticCredential}`), {
+			isAxiosError: true,
+			config: { headers: { Authorization: `Bearer ${syntheticCredential}` } },
+			request: { bytes: Buffer.from(syntheticCredential) },
+			response: { status: 500, data: { error: { message: syntheticCredential } } },
+		});
+		Object.defineProperty(error, 'cause', {
+			value: { config: error.config, stack: syntheticCredential },
+			enumerable: false,
+		});
+		return error;
+	}
+	it('projects transport errors without retaining axios config, response, cause, or bytes', async () => {
+		const f = fake({}, { apiKey: syntheticCredential });
+		f.http.mockRejectedValue(axiosError());
+		await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+			assertSecretAbsent(error, syntheticCredential);
+			expect(error).toBeInstanceOf(NodeApiError);
+			expect(error.errorResponse).toMatchObject({ message: 'Proxy echoed [REDACTED] [Item 1]' });
+			expect(error.errorResponse).not.toHaveProperty('config');
+			expect(error.errorResponse).not.toHaveProperty('response');
+			expect(error.errorResponse).not.toHaveProperty('cause');
+			return true;
+		});
+	});
+	it('redacts 4xx projections including issue paths without retaining unknown payloads', async () => {
+		const f = fake({}, { apiKey: syntheticCredential });
+		f.http.mockResolvedValue({
+			statusCode: 422,
+			headers: {},
+			body: {
+				error: {
+					type: syntheticCredential,
+					message: syntheticCredential,
+					issues: [
+						null,
+						{ path: ['questions', syntheticCredential], message: syntheticCredential },
+					],
+				},
+				config: { headers: { Authorization: syntheticCredential } },
+				request_id: syntheticCredential,
+			},
+		});
+		await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+			assertSecretAbsent(error, syntheticCredential);
+			expect(error.description).toContain('questions.[REDACTED]: [REDACTED]');
+			expect(error.errorResponse).not.toHaveProperty('config');
+			return true;
+		});
+	});
+	it('redacts every success field and rejects an echoed invalid Route choice safely', async () => {
+		const f = fake({}, { apiKey: syntheticCredential });
+		f.http.mockResolvedValue(
+			response(
+				undefined,
+				200,
+				{},
+				{
+					model: syntheticCredential,
+					usage: { echoed: syntheticCredential },
+					nested: { value: syntheticCredential },
+					request_id: syntheticCredential,
+				},
+			),
+		);
+		assertSecretAbsent(await f.run(), syntheticCredential);
+		const route = fake(
+			{ operation: 'route', labels: { label: [{ label: 'support' }] } },
+			{ apiKey: syntheticCredential },
+		);
+		route.http.mockResolvedValue(
+			response({ route: { ...answerSet.choice, choice: syntheticCredential } }),
+		);
+		route.raw.continueOnFail = () => true;
+		const result = await route.run();
+		expect(result[0]).toEqual([]);
+		expect(result[1][0].json.error).toContain('Unexpected response');
+		assertSecretAbsent(result, syntheticCredential);
+	});
+	it('uses only the standard credential test declaration and no node-level tester', () => {
+		const node = new Nace();
+		expect(node.methods).not.toHaveProperty('credentialTest');
+		expect(node.description.credentials?.[0]).not.toHaveProperty('testedBy');
+		expect(new NaceApi().test.request.method).toBe('GET');
+	});
+	it('does not traverse a transport cause at all', async () => {
+		const error = new Error('Network failed');
+		Object.defineProperty(error, 'cause', {
+			get: () => {
+				throw new Error('Must not traverse cause');
+			},
+		});
+		const f = fake();
+		f.http.mockRejectedValue(error);
+		await expect(f.run()).rejects.toThrow('Network failed');
+	});
+	it.each([
+		{ approved: null },
+		{ approved: 'garbage' },
+		{},
+		{ approved: { type: 'choice', choice: 'yes' } },
+		{ approved: { type: { toString: 'invalid' }, noul: 0.5 } },
+		{ approved: { type: 'noul', noul: -0.1 } },
+		{ approved: { type: 'noul', noul: 1.1 } },
+		{ approved: { type: 'noul', noul: 'true' } },
+		{ approved: { type: 'noul', noul: 0.5, confidence: 2 } },
+		{ approved: { type: 'noul', noul: 0.5, probabilities: { true: -1 } } },
+		{ approved: { type: 'noul', noul: 0.5, probabilities: { true: '0.5' } } },
+	])('rejects malformed answers clearly even with Simplify enabled: %j', async (answers) => {
+		const f = fake({ options: { simplify: true } });
+		f.http.mockResolvedValue(response(answers));
+		await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+			expect(error).toBeInstanceOf(NodeApiError);
+			expect(error.message).toBe('Unexpected response from Nace [Item 1]');
+			expect(error.description).toContain('Question approved');
+			return true;
+		});
+	});
+	it('rejects a nonnumeric score and an invalid choice with no label-output side effects', async () => {
+		const f = fake({ questionsJson: { score } });
+		f.http.mockResolvedValue(response({ score: { type: 'score', score: 'high' } }));
+		await expect(f.run()).rejects.toThrow('Unexpected response');
+		const route = fake({ operation: 'route', labels: { label: [{ label: 'support' }] } });
+		route.raw.continueOnFail = () => true;
+		route.http.mockResolvedValue(response({ route: { ...answerSet.choice, confidence: 2 } }));
+		const outputs = await route.run();
+		expect(outputs[0]).toEqual([]);
+		expect(outputs[1][0].error).toBeInstanceOf(NodeApiError);
+	});
+	it('sets the installed response-size option for decisions and model lists', async () => {
+		const f = fake();
+		await f.run();
+		expect(f.http.mock.calls[0][1].maxResponseBodyBytes).toBe(8 * 1024 * 1024);
+		f.http.mockResolvedValue({ statusCode: 200, headers: {}, body: { models: [] } });
+		await getModels.call(f.context as never);
+		expect(f.http.mock.calls[1][1].maxResponseBodyBytes).toBe(16 * 1024 * 1024);
+	});
+	it('handles malformed model lists clearly and skips malformed entries', async () => {
+		const f = fake();
+		f.http.mockResolvedValue({ statusCode: 200, headers: {}, body: { models: {} } });
+		await expect(getModels.call(f.context as never)).rejects.toThrow(
+			'Unexpected response from Nace',
+		);
+		f.http.mockResolvedValue({
+			statusCode: 200,
+			headers: {},
+			body: { models: [null, 'bad', {}, { name: 'drex-v2.0' }] },
+		});
+		expect(await getModels.call(f.context as never)).toEqual([
+			{ name: 'drex-v2.0', value: 'drex-v2.0', description: '' },
+		]);
+	});
+	it.each([
+		{ mime: 'image/png', bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47]), valid: true },
+		{ mime: 'image/jpeg', bytes: Buffer.from([0xff, 0xd8, 0xff]), valid: true },
+		{ mime: 'image/webp', bytes: Buffer.from('RIFF1234WEBP'), valid: true },
+		{ mime: 'image/png', bytes: Buffer.from('not a PNG'), valid: false },
+		{ mime: 'image/jpeg', bytes: red, valid: false },
+		{ mime: 'image/webp', bytes: Buffer.from('RIFF1234FAKE'), valid: false },
+	])('checks binary signature for $mime / valid=$valid', async ({ mime, bytes, valid }) => {
+		const f = fake(
+			{ model: 'drex-max', imageProperties: 'attachment' },
+			{},
+			[{ json: {}, binary: { attachment: { data: '', mimeType: mime } } }],
+			{ attachment: bytes },
+		);
+		if (valid) {
+			await f.run();
+			expect(f.http).toHaveBeenCalledTimes(1);
+		} else {
+			await expect(f.run()).rejects.toThrow('Image attachment: content does not match');
+			expect(f.http).not.toHaveBeenCalled();
+		}
+	});
+	it.each([
+		{ sizes: ['17 MiB'], message: '16 MiB' },
+		{ sizes: ['12 MiB', '12 MiB', '12 MiB'], message: '32 MiB' },
+		{ sizes: ['4 MiB'], message: '4 MiB' },
+	])('rejects metadata sizes before any binary read: $sizes', async ({ sizes, message }) => {
+		const binary = Object.fromEntries(
+			sizes.map((size, i) => [`img${i}`, { data: '', mimeType: 'image/png', fileSize: size }]),
+		);
+		const f = fake({ model: 'drex-max', imageProperties: Object.keys(binary).join(',') }, {}, [
+			{ json: {}, binary },
+		]);
+		await expect(f.run()).rejects.toThrow(message);
+		expect(f.raw.helpers.getBinaryDataBuffer).not.toHaveBeenCalled();
+		expect(f.http).not.toHaveBeenCalled();
+	});
+	it('fails the JSON budget after the first large binary instead of loading later images', async () => {
+		const large = Buffer.alloc(3 * 1024 * 1024);
+		red.copy(large);
+		const f = fake({ model: 'drex-max', imageProperties: 'red,blue' }, {}, [imageItem], {
+			red: large,
+			blue,
+		});
+		await expect(f.run()).rejects.toThrow('4 MiB');
+		expect(f.raw.helpers.getBinaryDataBuffer).toHaveBeenCalledTimes(1);
+		expect(f.http).not.toHaveBeenCalled();
+	});
+	it.each([undefined, '1 B'])(
+		'checks actual image bytes before encoding when fileSize=%s',
+		async (fileSize) => {
+			const oversized = Buffer.alloc(16 * 1024 * 1024 + 1);
+			const encode = vi.spyOn(oversized, 'toString');
+			const f = fake(
+				{ model: 'drex-max', imageProperties: 'red,blue' },
+				{},
+				[{ ...imageItem, binary: { ...imageItem.binary, red: { ...imageItem.binary.red, fileSize } } }],
+				{ red: oversized, blue },
+			);
+			await expect(f.run()).rejects.toThrow('Image red exceeds the 16 MiB limit');
+			expect(f.raw.helpers.getBinaryDataBuffer).toHaveBeenCalledTimes(1);
+			expect(encode).not.toHaveBeenCalled();
+			expect(f.http).not.toHaveBeenCalled();
+		},
+	);
+	it.each(['nace', 'openrouter'])('uses the correct 402 billing URL for %s', async (backend) => {
+		const f = fake({}, { backend });
+		f.http.mockResolvedValue({ statusCode: 402, headers: {}, body: {} });
+		await expect(f.run()).rejects.toThrow(
+			backend === 'openrouter'
+				? 'https://openrouter.ai/settings/credits'
+				: 'https://console.nace.ai',
+		);
+	});
+	it('refuses OpenRouter models without a provider prefix before HTTP', async () => {
+		const f = fake({ model: 'drex-v2.0' }, { backend: 'openrouter' });
+		await expect(f.run()).rejects.toThrow('Try nace-ai/drex-v2.0');
+		expect(f.http).not.toHaveBeenCalled();
+	});
+	it.each(['Unsure', 'uNsUrE', ' unsure '])('reserves Route label %s', async (label) => {
+		const f = fake({ operation: 'route', labels: { label: [{ label }] } });
+		await expect(f.run()).rejects.toThrow('reserved');
+		expect(f.http).not.toHaveBeenCalled();
+	});
+	it.each([3000, 120000])(
+		'handles Retry-After HTTP dates with a 60-second wait cap: %s ms',
+		async (offset) => {
+			vi.useFakeTimers();
+			vi.setSystemTime(new Date('2026-11-06T00:00:00Z'));
+			const f = fake();
+			f.http.mockResolvedValueOnce(
+				response({}, 429, { 'Retry-After': new Date(Date.now() + offset).toUTCString() }),
+			);
+			const pending = f.run();
+			const delay = Math.min(offset, 60000);
+			await vi.advanceTimersByTimeAsync(delay - 1);
+			expect(f.http).toHaveBeenCalledTimes(1);
+			await vi.advanceTimersByTimeAsync(1);
+			await pending;
+			expect(f.http).toHaveBeenCalledTimes(2);
+		},
+	);
+	it('asserts simplified noul values and retains binaries on successful inclusive output', async () => {
+		const f = fake({ options: { simplify: true, includeOtherFields: true } }, {}, [imageItem]);
+		const result = await f.run();
+		expect(result[0][0].json.answers).toEqual({ approved: { value: 0.95, confidence: 0.9 } });
+		expect(result[0][0].binary).toEqual(imageItem.binary);
+	});
+	it.each(['stateJson', 'questionsJson'])('reports invalid %s JSON before HTTP', async (name) => {
+		const f = fake({ [name]: '{broken', ...(name === 'stateJson' ? { stateFormat: 'json' } : {}) });
+		await expect(f.run()).rejects.toThrow(
+			`${name === 'stateJson' ? 'State (JSON)' : 'Questions (JSON)'} must be valid JSON`,
+		);
+		expect(f.http).not.toHaveBeenCalled();
+	});
+	it('pins CLI and workflow actions and isolates npm publishing privileges', () => {
+		const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+		const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+		expect(pkg.devDependencies['@n8n/node-cli']).toBe('0.55.5');
+		expect(lock.packages[''].devDependencies['@n8n/node-cli']).toBe('0.55.5');
+		const ci = readFileSync('.github/workflows/ci.yml', 'utf8');
+		const publish = readFileSync('.github/workflows/publish.yml', 'utf8');
+		for (const workflow of [ci, publish]) {
+			expect(workflow).toContain('contents: read');
+			expect(workflow).toContain('persist-credentials: false');
+			for (const match of workflow.matchAll(/uses: ([^\s#]+)/g))
+				expect(match[1]).toMatch(/@[a-f0-9]{40}$/);
+		}
+		expect(ci).toContain('actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0');
+		expect(ci).toContain('actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0');
+		const [build, release] = publish.split('\n  publish:');
+		expect(build).not.toContain('id-token: write');
+		expect(ci).toContain('npm ci --ignore-scripts');
+		expect(build).toContain('npm ci --ignore-scripts');
+		expect(build).toContain('npm run lint');
+		expect(build).toContain('npm test');
+		expect(build).toContain('npm run build');
+		expect(build).toContain('npm pack');
+		expect(build).toContain('actions/upload-artifact@');
+		expect(publish).toContain("'v*.*.*'");
+		expect(publish).toContain('workflow_dispatch:');
+		expect(release).toContain('needs: build');
+		expect(release).toContain('id-token: write');
+		expect(release).toContain('environment: npm-publish');
+		expect(release).not.toContain('npm ci');
+		expect(release).not.toContain('actions/checkout');
+		expect(release).toContain('actions/download-artifact@');
+		expect(release).toContain('npm publish "$1" --provenance --access public');
+	});
+});
+
+describe('declarative credential tests and verified-node wording', () => {
+	it.each(['nace', 'openrouter'])(
+		'declares the standard %s endpoint and attribution headers',
+		async (backend) => {
+			const credential = new NaceApi();
+			const data = {
+				backend,
+				apiKey: 'synthetic',
+				baseUrl: ' https://CONSOLE.NACE.AI:443/old/../api/// ',
+				openRouterBaseUrl: ' https://OPENROUTER.AI:443/old/../api/// ',
+			};
+			const test = credential.test.request;
+			expect(test.method).toBe('GET');
+			expect(evaluateMetadata(test.url as string, {}, data)).toBe(
+				backend === 'openrouter' ? '/v1/key' : '/v1/models',
+			);
+			const baseURL = evaluateMetadata(test.baseURL as string, {}, data) as string;
+			const options = await credential.authenticate(data, {
+				url: evaluateMetadata(test.url as string, {}, data) as string,
+				baseURL,
+				method: 'GET',
+			});
+			expect(options.baseURL).toBe(
+				backend === 'openrouter' ? 'https://openrouter.ai/api' : 'https://console.nace.ai/api',
+			);
+			expect(options.headers?.Authorization).toBe('Bearer synthetic');
+			expect(test.headers).toMatchObject({ 'User-Agent': CLIENT, 'X-Nace-Client': CLIENT });
+			expect(evaluateMetadata(test.headers!['HTTP-Referer'] as string, {}, data)).toBe(
+				backend === 'openrouter' ? 'https://nace.ai' : undefined,
+			);
+			expect(new Nace().methods).not.toHaveProperty('credentialTest');
+			expect(new Nace().description.credentials?.[0]).not.toHaveProperty('testedBy');
+		},
+	);
+	it('starts text placeholders with e.g. and keeps collection button labels', () => {
+		function check(value: unknown) {
+			if (!value || typeof value !== 'object') return;
+			const field = value as Record<string, unknown>;
+			if (field.type === 'string' && typeof field.placeholder === 'string')
+				expect(field.placeholder).toMatch(/^e\.g\./);
+			if (
+				['collection', 'fixedCollection'].includes(String(field.type)) &&
+				typeof field.placeholder === 'string'
+			)
+				expect(field.placeholder).toMatch(/^Add /);
+			if (typeof field.description === 'string')
+				expect(field.description).not.toMatch(/\b(error|problem|failure|mistake)s?\b/i);
+			for (const entry of Object.values(field)) check(entry);
+		}
+		check(new Nace().description.properties);
+		check(new NaceApi().properties);
+		expect(
+			new Nace().description.properties.find((field) => field.name === 'imageProperties')
+				?.placeholder,
+		).toBe('e.g. image1,image2');
+	});
+	it('names the parameter and uses the one-based item number on continued messages', async () => {
+		const f = fake(
+			{ model: (index: number) => (index === 0 ? 'nace-ai/drex-v2.0' : 'drex-v2.0') },
+			{ backend: 'openrouter' },
+			[{ json: {} }, { json: {} }],
+		);
+		f.raw.continueOnFail = () => true;
+		const result = await f.run();
+		expect(result[0][1].json.error).toBe(
+			'Model Name or ID: OpenRouter models must start with nace-ai/. Try nace-ai/drex-v2.0. [Item 2]',
+		);
+		expect(result[0][1].pairedItem).toEqual({ item: 1 });
+		expect(f.http).toHaveBeenCalledTimes(1);
+	});
+	it('uses Type instead of Error type and preserves API type strings verbatim', async () => {
+		const f = fake();
+		f.http.mockResolvedValue({
+			statusCode: 401,
+			headers: {},
+			body: { error: { type: 'authentication_error', message: 'Invalid token' } },
+		});
+		await expect(f.run()).rejects.toSatisfy((issue: NodeApiError) => {
+			expect(issue.message).toBe('API Key: Check your Nace API credential. [Item 1]');
+			expect(issue.description).toContain('Type: authentication_error');
+			expect(issue.description).not.toContain('Error type:');
+			expect(issue.message + issue.description).not.toMatch(
+				/\b(error|problem|failure|mistake)s?\b/i,
+			);
+			return true;
+		});
+	});
+	it('names Questions in malformed response descriptions and includes the item once', async () => {
+		const f = fake();
+		f.http.mockResolvedValue(response({ approved: null }));
+		await expect(f.run()).rejects.toSatisfy((issue: NodeApiError) => {
+			expect(issue.description).toBe(
+				'Questions: Question approved: expected an answer object [Item 1]',
+			);
+			expect(issue.message.match(/\[Item 1\]/g)).toHaveLength(1);
+			return true;
+		});
+	});
+	it('has no runtime lint exemptions or deprecated credential helper left', () => {
+		for (const directory of ['nodes/Nace', 'credentials'])
+			for (const file of readdirSync(directory).filter((name) => name.endsWith('.ts'))) {
+				const source = readFileSync(`${directory}/${file}`, 'utf8');
+				expect(source).not.toContain('eslint-disable');
+				expect(source).not.toContain('helpers.request');
+				expect(source).not.toContain('testNaceApi');
+			}
 	});
 });

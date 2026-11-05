@@ -224,7 +224,7 @@ export const properties: INodeProperties[] = [
 		default: 0.5,
 		typeOptions: { minValue: 0, maxValue: 1, numberPrecision: 3 },
 		description:
-			'Confidence below this threshold goes to Unsure. Set 0 to route by label regardless of confidence. Continued errors always go to Unsure.',
+			'Confidence below this threshold goes to Unsure. Set 0 to route by label regardless of confidence. Items that cannot be processed go to Unsure.',
 		displayOptions: { show: { operation: ['route'] } },
 	},
 	{
@@ -232,7 +232,7 @@ export const properties: INodeProperties[] = [
 		name: 'imageProperties',
 		type: 'string',
 		default: '',
-		placeholder: 'image1,image2',
+		placeholder: 'e.g. image1,image2',
 		description:
 			'Comma-separated binary property names in Image 1, Image 2 order. Only drex-max models support images.',
 	},
@@ -254,7 +254,7 @@ export const properties: INodeProperties[] = [
 				displayName: 'Max Retries',
 				name: 'maxRetries',
 				type: 'number',
-				default: 3,
+				default: 5,
 				typeOptions: { minValue: 0, maxValue: 10, numberPrecision: 0 },
 				description: 'Maximum retries on 429 or 529 responses',
 			},
