@@ -393,7 +393,7 @@ describe('errors, retries, and routing', () => {
 	});
 	it.each([
 		{ headers: { 'retry-after': '2' }, delay: 2000 },
-		{ headers: {}, delay: 1000 },
+		{ headers: {}, delay: 2000 },
 	])('falls back to seconds or exponential backoff', async ({ headers, delay }) => {
 		vi.useFakeTimers();
 		const f = fake();
@@ -503,8 +503,9 @@ describe('credentials, models, and attribution', () => {
 			url: 'https://console.nace.ai/v1/models',
 			headers: { 'User-Agent': CLIENT, 'X-Nace-Client': CLIENT },
 		});
+		expect(f.http.mock.calls[0][1]).not.toHaveProperty('qs');
 	});
-	it('uses OpenRouter model IDs rather than human-readable model names', async () => {
+	it('requests all OpenRouter output modalities and displays names while filtering to Nace model IDs', async () => {
 		const f = fake(
 			{},
 			{
@@ -518,17 +519,40 @@ describe('credentials, models, and attribution', () => {
 			headers: {},
 			body: {
 				data: [
-					{ id: 'nace-ai/drex-max', name: 'Nace: Drex Max' },
-					{ id: 'nace-ai/drex-v2.0', name: 'Nace: Drex V2' },
+					{
+						id: 'nace-ai/drex-max',
+						name: 'Nace.AI: Drex Max',
+						description: 'Drex decisions with images',
+					},
+					{
+						id: 'nace-ai/drex-v2.0',
+						name: 'Nace.AI: Drex v2.0',
+						description: 'Fast text decisions',
+					},
+					{ id: 'nace-ai/drex-v1.5' },
 					{ id: 'other-vendor/model', name: 'Another model' },
 					{ id: 'nace-ai/retired', name: 'Old Drex', retired: true },
 				],
 			},
 		});
-		expect((await getModels.call(f.context as never)).map((m) => m.value)).toEqual([
-			'nace-ai/drex-max',
-			'nace-ai/drex-v2.0',
+		expect(await getModels.call(f.context as never)).toEqual([
+			{
+				name: 'Nace.AI: Drex Max',
+				value: 'nace-ai/drex-max',
+				description: 'Drex decisions with images',
+			},
+			{
+				name: 'Nace.AI: Drex v2.0',
+				value: 'nace-ai/drex-v2.0',
+				description: 'Fast text decisions',
+			},
+			{ name: 'nace-ai/drex-v1.5', value: 'nace-ai/drex-v1.5', description: '' },
 		]);
+		expect(f.http.mock.calls[0][1]).toMatchObject({
+			method: 'GET',
+			url: 'https://openrouter.ai/api/v1/models',
+			qs: { output_modalities: 'all' },
+		});
 		expect(f.http.mock.calls[0][1].headers).toMatchObject({
 			'HTTP-Referer': 'https://nace.ai',
 			'X-OpenRouter-Title': 'Drex for n8n',
@@ -1169,5 +1193,345 @@ describe('backend and permanent Unsure regressions', () => {
 			answerSet.choice,
 		]);
 		expect(result[0].map((item) => item.pairedItem)).toEqual([{ item: 0 }, { item: 1 }]);
+	});
+});
+
+describe.each(['nace', 'openrouter'])('%s response metadata', (backend) => {
+	const idCases = [
+		{
+			request_id: 'req-body',
+			headers: { 'X-Request-Id': 'req-header' },
+			id: 'gen-dec-body',
+			expected: 'req-body',
+		},
+		{
+			request_id: null,
+			headers: { 'X-Request-Id': 'req-header' },
+			id: 'gen-dec-body',
+			expected: 'req-header',
+		},
+		{
+			request_id: undefined,
+			headers: {},
+			id: 'gen-dec-body',
+			expected: backend === 'openrouter' ? 'gen-dec-body' : undefined,
+		},
+		{
+			request_id: null,
+			headers: {},
+			id: 'gen-dec-body',
+			expected: backend === 'openrouter' ? 'gen-dec-body' : undefined,
+		},
+	];
+	it.each(idCases)(
+		'selects request_id=$expected and preserves usage costs, provider, and score legend',
+		async ({ request_id, headers, id, expected }) => {
+			const f = fake({ questionsJson: { score } }, { backend });
+			const usage = {
+				input_tokens: 17,
+				output_tokens: 4,
+				cost: 0.000017,
+				cost_details: { upstream_inference_cost: 0.000017 },
+			};
+			const legend = backend === 'openrouter' ? { '0': 'Low', '1': 'High' } : ['Low', 'High'];
+			const answer = { ...answerSet.score, legend };
+			f.http.mockResolvedValue(
+				response({ score: answer }, 200, headers, {
+					request_id,
+					id,
+					usage,
+					provider: 'Synthetic provider',
+				}),
+			);
+			const output = (await f.run())[0][0].json;
+			expect(output.request_id).toBe(expected);
+			expect(output.id).toBe(id);
+			expect(output.usage).toEqual(usage);
+			expect(output.provider).toBe('Synthetic provider');
+			expect(output.answers).toEqual({ score: answer });
+			expect(f.http.mock.calls[0][1]).not.toHaveProperty('qs');
+		},
+	);
+	it.each(idCases)(
+		'uses request_id=$expected in API error descriptions',
+		async ({ request_id, headers, id, expected }) => {
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({
+				statusCode: 422,
+				headers,
+				body: {
+					request_id,
+					id,
+					error: {
+						type: 'invalid_request_error',
+						message: 'Invalid decision request',
+						issues: [{ path: 'questions.score', message: 'Invalid criteria' }],
+					},
+				},
+			});
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				if (expected === undefined) expect(error.description).not.toContain('Request ID:');
+				else expect(error.description).toContain(`Request ID: ${expected}`);
+				expect(error.description).toContain('questions.score: Invalid criteria');
+				return true;
+			});
+		},
+	);
+	it('redacts a credential echoed in the generation ID on a continued error', async () => {
+		const syntheticCredential = 'synthetic-metadata-secret';
+		const f = fake({}, { backend, apiKey: syntheticCredential });
+		f.raw.continueOnFail = () => true;
+		f.http.mockResolvedValue({
+			statusCode: 422,
+			headers: {},
+			body: { id: `gen-dec-${syntheticCredential}`, error: { message: 'Invalid request' } },
+		});
+		const result = await f.run();
+		if (backend === 'openrouter')
+			expect(result[0][0].json.description).toContain('Request ID: gen-dec-[REDACTED]');
+		else expect(result[0][0].json.description || '').not.toContain('Request ID:');
+		expect(JSON.stringify(result)).not.toContain(syntheticCredential);
+	});
+	it('keeps usage costs when Simplify is enabled', async () => {
+		const f = fake({ options: { simplify: true } }, { backend });
+		const usage = { input_tokens: 2, output_tokens: 1, cost: 0.000002 };
+		f.http.mockResolvedValue(
+			response(undefined, 200, {}, { request_id: null, id: 'gen-dec-simple', usage }),
+		);
+		const output = (await f.run())[0][0].json;
+		expect(output.request_id).toBe(backend === 'openrouter' ? 'gen-dec-simple' : undefined);
+		expect(output.usage).toEqual(usage);
+	});
+});
+
+describe.each(['nace', 'openrouter'])('%s response validation and missing IDs', (backend) => {
+	it('accepts a successful response without any ID and omits request_id', async () => {
+		const f = fake({}, { backend });
+		f.http.mockResolvedValue({
+			statusCode: 200,
+			headers: {},
+			body: { answers: { approved: answerSet.noul }, usage: { input_tokens: 1 } },
+		});
+		const output = (await f.run())[0][0].json;
+		expect(output).not.toHaveProperty('request_id');
+		expect(output.answers).toEqual({ approved: answerSet.noul });
+	});
+	it.each([undefined, null, ''])(
+		'reports a clear bodyless 500 error without IDs (body=%s)',
+		async (body) => {
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({ statusCode: 500, headers: {}, body });
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				expect(error.message).toBe('Drex API returned status 500');
+				expect(error.httpCode).toBe('500');
+				expect(error.description || '').not.toContain('Request ID:');
+				return true;
+			});
+			f.raw.continueOnFail = () => true;
+			const output = (await f.run())[0][0].json;
+			expect(output.error).toBe('Drex API returned status 500');
+			expect(output).not.toHaveProperty('request_id');
+		},
+	);
+	it.each([undefined, null, 'not-json', 42, false, [], [{ answers: {} }], new Date(0)])(
+		'rejects a non-plain-object 2xx body clearly: %s',
+		async (body) => {
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({
+				statusCode: 200,
+				headers: { 'x-request-id': ['req-header', 'ignored-header'] },
+				body,
+			});
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				expect(error.message).toBe(
+					`Unexpected response from ${backend === 'openrouter' ? 'OpenRouter' : 'Nace'}`,
+				);
+				expect(error.description).toBe('Expected a JSON object in the response body.');
+				return true;
+			});
+		},
+	);
+	const scalarCases = [
+		{ request_id: 0, header: ['req-header'], id: 'gen-dec-body', expected: 0 },
+		{ request_id: 123, header: 'req-header', id: 'gen-dec-body', expected: 123 },
+		{
+			request_id: {},
+			header: ['req-first', 'req-second'],
+			id: 'gen-dec-body',
+			expected: 'req-first',
+		},
+		{
+			request_id: ['invalid-array'],
+			header: 'req-header',
+			id: 'gen-dec-body',
+			expected: 'req-header',
+		},
+		{ request_id: null, header: 0, id: 'gen-dec-body', expected: 0 },
+		{ request_id: null, header: [], id: 456, expected: backend === 'openrouter' ? 456 : undefined },
+		{ request_id: null, header: [], id: 0, expected: backend === 'openrouter' ? 0 : undefined },
+		{
+			request_id: {},
+			header: [{ malformed: true }, 'must-not-use-second'],
+			id: ['invalid-array'],
+			expected: undefined,
+		},
+		{ request_id: ['invalid-array'], header: {}, id: { malformed: true }, expected: undefined },
+		{ request_id: false, header: true, id: false, expected: undefined },
+		{ request_id: NaN, header: Infinity, id: Infinity, expected: undefined },
+	];
+	it.each(scalarCases)(
+		'uses only scalar request IDs and the first header value (expected=$expected)',
+		async ({ request_id, header, id, expected }) => {
+			const f = fake({}, { backend });
+			const body = { answers: { approved: answerSet.noul }, request_id, id };
+			const headers = { 'X-Request-Id': header };
+			f.http.mockResolvedValue({ statusCode: 200, headers, body });
+			const output = (await f.run())[0][0].json;
+			if (expected === undefined) expect(output).not.toHaveProperty('request_id');
+			else expect(output.request_id).toBe(expected);
+			f.http.mockResolvedValue({
+				statusCode: 422,
+				headers,
+				body: { ...body, error: { message: 'Invalid request' } },
+			});
+			await expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+				expect(error).toBeInstanceOf(NodeApiError);
+				if (expected === undefined) expect(error.description || '').not.toContain('Request ID:');
+				else expect(error.description).toContain(`Request ID: ${expected}`);
+				expect(error.description || '').not.toContain('[object Object]');
+				expect(error.description || '').not.toContain('must-not-use-second');
+				return true;
+			});
+		},
+	);
+	it('normalizes IDs on a copy of a frozen plain response body', async () => {
+		const f = fake({}, { backend });
+		const body = Object.freeze({ answers: { approved: answerSet.noul } });
+		f.http.mockResolvedValue({
+			statusCode: 200,
+			headers: { 'x-request-id': ['req-first', 'req-second'] },
+			body,
+		});
+		expect((await f.run())[0][0].json.request_id).toBe('req-first');
+		expect(body).not.toHaveProperty('request_id');
+	});
+});
+
+describe('backend image counts and headerless retries', () => {
+	it.each([
+		{ backend: 'openrouter', count: 4, limit: 4 },
+		{ backend: 'openrouter', count: 5, limit: 4 },
+		{ backend: 'nace', count: 8, limit: 8 },
+		{ backend: 'nace', count: 9, limit: 8 },
+	])('$backend accepts at most $limit images (count=$count)', async ({ backend, count, limit }) => {
+		const names = Array.from({ length: count }, (_, index) => `image${index + 1}`);
+		const binary = Object.fromEntries(
+			names.map((name) => [name, { data: '', mimeType: 'image/png' }]),
+		);
+		const buffers = Object.fromEntries(
+			names.map((name, index) => [name, index % 2 === 0 ? red : blue]),
+		);
+		const f = fake(
+			{
+				model: backend === 'openrouter' ? 'nace-ai/drex-max' : 'drex-max',
+				imageProperties: names.join(','),
+			},
+			{ backend },
+			[{ json: {}, binary }],
+			buffers,
+		);
+		if (count > limit) {
+			await expect(f.run()).rejects.toSatisfy((error: NodeOperationError) => {
+				expect(error).toBeInstanceOf(NodeOperationError);
+				expect(error.message).toContain(backend === 'openrouter' ? 'OpenRouter' : 'Nace');
+				expect(error.message).toContain(`At most ${limit} images`);
+				return true;
+			});
+			expect(f.http).not.toHaveBeenCalled();
+			expect(f.raw.helpers.getBinaryDataBuffer).not.toHaveBeenCalled();
+		} else {
+			await f.run();
+			expect(f.http).toHaveBeenCalledTimes(1);
+			const images =
+				backend === 'openrouter'
+					? body(f.http)
+							.state.slice(1)
+							.map((part: { image_url: { url: string } }) => part.image_url.url)
+					: body(f.http).images;
+			expect(images).toEqual(
+				names.map((name) => `data:image/png;base64,${buffers[name].toString('base64')}`),
+			);
+		}
+	});
+	it('shows five default retries in the node UI', () => {
+		const options = new Nace().description.properties.find(
+			(property) => property.name === 'options',
+		)!;
+		const retries = (options.options as INodeProperties[]).find(
+			(property) => property.name === 'maxRetries',
+		)!;
+		expect(retries.default).toBe(5);
+	});
+	it.each(['nace', 'openrouter'])(
+		'retries headerless 429 responses five times on %s at 2, 4, 8, 16, and 30 seconds',
+		async (backend) => {
+			vi.useFakeTimers();
+			const f = fake({}, { backend });
+			f.http.mockResolvedValue({
+				statusCode: 429,
+				headers: {},
+				body: { error: { message: 'Model busy, retry later' } },
+			});
+			const pending = expect(f.run()).rejects.toThrow('Model busy, retry later');
+			await vi.advanceTimersByTimeAsync(0);
+			let calls = 1;
+			for (const delay of [2000, 4000, 8000, 16000, 30000]) {
+				expect(f.http).toHaveBeenCalledTimes(calls);
+				await vi.advanceTimersByTimeAsync(delay - 1);
+				expect(f.http).toHaveBeenCalledTimes(calls);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(f.http).toHaveBeenCalledTimes(++calls);
+			}
+			await pending;
+			expect(f.http).toHaveBeenCalledTimes(6);
+			expect(vi.getTimerCount()).toBe(0);
+		},
+	);
+	it('uses five default retries for model loading too', async () => {
+		vi.useFakeTimers();
+		const f = fake({}, { backend: 'openrouter' });
+		f.http.mockResolvedValue({
+			statusCode: 429,
+			headers: {},
+			body: { error: { message: 'Model busy, retry later' } },
+		});
+		const pending = expect(getModels.call(f.context as never)).rejects.toBeInstanceOf(NodeApiError);
+		await vi.runAllTimersAsync();
+		await pending;
+		expect(f.http).toHaveBeenCalledTimes(6);
+	});
+	it('caps repeated headerless waits at 30 seconds and stops after 120 seconds total sleep', async () => {
+		vi.useFakeTimers();
+		const f = fake({ options: { maxRetries: 10 } }, { backend: 'openrouter' });
+		f.http.mockResolvedValue({
+			statusCode: 429,
+			headers: {},
+			body: { error: { message: 'Model busy, retry later' } },
+		});
+		const pending = expect(f.run()).rejects.toThrow('Model busy, retry later');
+		await vi.advanceTimersByTimeAsync(0);
+		let calls = 1;
+		for (const delay of [2000, 4000, 8000, 16000, 30000, 30000, 30000]) {
+			await vi.advanceTimersByTimeAsync(delay - 1);
+			expect(f.http).toHaveBeenCalledTimes(calls);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(f.http).toHaveBeenCalledTimes(++calls);
+		}
+		await pending;
+		expect(f.http).toHaveBeenCalledTimes(8);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

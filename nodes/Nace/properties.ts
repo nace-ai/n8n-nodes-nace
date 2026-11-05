@@ -254,7 +254,7 @@ export const properties: INodeProperties[] = [
 				displayName: 'Max Retries',
 				name: 'maxRetries',
 				type: 'number',
-				default: 3,
+				default: 5,
 				typeOptions: { minValue: 0, maxValue: 10, numberPrecision: 0 },
 				description: 'Maximum retries on 429 or 529 responses',
 			},

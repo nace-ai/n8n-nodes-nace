@@ -69,7 +69,7 @@ Images require a model whose ID contains `drex-max`. Enter binary property names
 Client-side limits:
 
 - 1–512 questions per request, on every model.
-- At most 8 images; PNG, JPEG, or WebP only.
+- At most **8 images on Nace** or **4 images on OpenRouter** (Drex Max is served through DeepInfra). PNG, JPEG, or WebP only. Exceeding the selected backend’s limit is refused before an API request.
 - At most 16 MiB per image and 32 MiB total image bytes.
 - The complete UTF-8 JSON body must be **smaller than 4 MiB**, including base64. This is usually the binding image limit; resize images before sending.
 
@@ -77,11 +77,11 @@ Images on other models are refused before an API request. Binary attachments can
 
 ## Output and options
 
-Default output preserves `answers` (including `probabilities`), `model`, `usage`, `request_id`, and `evaluation_time_ms`. If the API returns its request ID only in the `x-request-id` header, that ID is included in the output.
+Default output preserves `answers` (including `probabilities`), `model`, `usage`, `request_id`, and `evaluation_time_ms`. The node sets `request_id` from the response body’s `request_id`, then the `x-request-id` response header. Only OpenRouter also falls back to the body’s generation `id`. IDs must be strings or numbers; an array-valued header uses its first element. When no valid ID is available, `request_id` is omitted. Error descriptions use the same backend-specific order. A successful response must contain a JSON object; other body types produce a clear unexpected-response error.
 
 **Simplify** replaces each answer with `{ "value": ..., "confidence": ... }`; it intentionally omits probability distributions and legends. Metadata remains available. **Include Other Input Fields** copies the input JSON and binary data into output; response fields take precedence on collisions. Items retain n8n pairing.
 
-**Timeout** defaults to 60000 ms per attempt. **Max Retries** defaults to 3 additional attempts and is capped at 10. Only HTTP 429 and 529 responses are retried, using `retry-after-ms`, then `retry-after` seconds, then exponential backoff (1 second initially, capped at 30 seconds). Each wait is capped at 60000 ms, and total sleep is capped at 120000 ms per input item. Once that budget is exhausted, the last API error is returned. The configured request timeout is passed to every attempt. Timeouts and transport errors are surfaced without retrying.
+**Timeout** defaults to 60000 ms per attempt. **Max Retries** defaults to 5 additional attempts and is capped at 10. Only HTTP 429 and 529 responses are retried, using `retry-after-ms`, then `retry-after` seconds, then exponential backoff when retry headers are absent (2, 4, 8, 16, then 30 seconds per wait). Header-specified waits are capped at 60000 ms, and total sleep is capped at 120000 ms per input item. Once that budget is exhausted, the last API error is returned. The configured request timeout is passed to every attempt. Timeouts and transport errors are surfaced without retrying.
 
 Enable n8n's **On Error > Continue** to keep processing later input items, including when parameter expressions fail. Errors include a message and description and retain item pairing. With **Include Other Input Fields** enabled, continued error items retain both input JSON and binary attachments.
 
@@ -104,6 +104,10 @@ The exact credential API key is replaced with `[REDACTED]` throughout API and tr
 ## OpenRouter
 
 Use model `nace-ai/drex-v2.0` for text, or `nace-ai/drex-max` for images. The request path is `/v1/systemone` under `https://openrouter.ai/api`. For images, state becomes a content array of text and `image_url` parts, with no top-level `images` field. JSON state is serialized in the text part. Requests include `HTTP-Referer: https://nace.ai` and `X-OpenRouter-Title: Drex for n8n`.
+
+The model dropdown requests `GET /api/v1/models?output_modalities=all` to include Drex decision models, filters to `nace-ai/` IDs, and displays each model’s name and description when supplied. The Nace model request remains `GET /v1/models`.
+
+OpenRouter responses include `usage.cost` and may include `provider`; the node keeps usage and provider as returned. With full output (Simplify off), a score’s `legend` is passed through unchanged: OpenRouter may return an object keyed by index instead of an array. For the OpenRouter backend only, its generation `id` (for example, `gen-dec-...`) is used as `request_id` when neither a body request ID nor an `x-request-id` header is present.
 
 All API requests, model loading, and credential tests include `User-Agent` and `X-Nace-Client` set to `n8n-nodes-nace/<package version>`.
 

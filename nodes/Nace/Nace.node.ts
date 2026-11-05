@@ -98,7 +98,13 @@ export class Nace implements INodeType {
 						index,
 						'Images require a drex-max model (nace-ai/drex-max on OpenRouter). Select a Max model or remove the image properties.',
 					);
-				if (imageNames.length > 8) fail(this, index, 'At most 8 images are allowed per request');
+				const imageLimit = openRouter ? 4 : 8;
+				if (imageNames.length > imageLimit)
+					fail(
+						this,
+						index,
+						`${openRouter ? 'OpenRouter' : 'Nace'}: At most ${imageLimit} images are allowed per request`,
+					);
 				const images: string[] = [];
 				let total = 0;
 				for (const name of imageNames) {
@@ -127,7 +133,7 @@ export class Nace implements INodeType {
 						'JSON request body must be smaller than 4 MiB, including base64 images. Resize images or shorten the state.',
 					);
 				const timeout = Number(options.timeout ?? 60000);
-				const retries = Number(options.maxRetries ?? 3);
+				const retries = Number(options.maxRetries ?? 5);
 				if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(retries))
 					fail(this, index, 'Timeout must be positive and max retries must be a finite number');
 				const response = await request(

@@ -14,7 +14,19 @@ type Context = IExecuteFunctions | ILoadOptionsFunctions;
 interface FullResponse {
 	statusCode: number;
 	headers: Record<string, string | number | string[] | undefined>;
-	body: IDataObject;
+	body: unknown;
+}
+
+function isPlainObject(value: unknown): value is IDataObject {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+function scalarRequestId(value: unknown): string | number | undefined {
+	if (typeof value === 'string' && value !== '') return value;
+	if (typeof value === 'number' && Number.isFinite(value)) return value;
+	return undefined;
 }
 
 // Sanitize the entire error payload before n8n stores it as the error cause.
@@ -39,7 +51,7 @@ export async function request(
 	method: 'GET' | 'POST',
 	body?: IDataObject,
 	timeout = 60000,
-	retries = 3,
+	retries = 5,
 	itemIndex?: number,
 ): Promise<IDataObject> {
 	const credentials = await context.getCredentials('naceApi');
@@ -59,6 +71,7 @@ export async function request(
 			response = (await context.helpers.httpRequestWithAuthentication.call(context, 'naceApi', {
 				method,
 				url: `${baseUrl}/v1/${method === 'GET' ? 'models' : 'systemone'}`,
+				...(method === 'GET' && openRouter ? { qs: { output_modalities: 'all' } } : {}),
 				body,
 				headers,
 				timeout,
@@ -81,7 +94,7 @@ export async function request(
 					? Number(ms)
 					: seconds !== undefined && Number.isFinite(Number(seconds)) && Number(seconds) >= 0
 						? Number(seconds) * 1000
-						: Math.min(30000, 1000 * 2 ** attempt);
+						: Math.min(30000, 2000 * 2 ** attempt);
 			if (totalSleep < 120000) {
 				const delay = Math.min(requestedDelay, 60000, 120000 - totalSleep);
 				await sleep(delay);
@@ -89,21 +102,38 @@ export async function request(
 				continue;
 			}
 		}
-		const data = response.body || {};
+		const data = isPlainObject(response.body) ? { ...response.body } : undefined;
+		const headerId = responseHeaders['x-request-id'];
+		const requestId =
+			scalarRequestId(data?.request_id) ??
+			scalarRequestId(Array.isArray(headerId) ? headerId[0] : headerId) ??
+			(openRouter ? scalarRequestId(data?.id) : undefined);
 		if (response.statusCode >= 200 && response.statusCode < 300) {
-			if (!data.request_id && responseHeaders['x-request-id'])
-				data.request_id = String(responseHeaders['x-request-id']);
+			if (!data) {
+				throw new NodeApiError(
+					context.getNode(),
+					{},
+					{
+						message: `Unexpected response from ${openRouter ? 'OpenRouter' : 'Nace'}`,
+						description: 'Expected a JSON object in the response body.',
+						httpCode: String(response.statusCode),
+						itemIndex,
+					},
+				);
+			}
+			if (requestId !== undefined) data.request_id = requestId;
+			else delete data.request_id;
 			return data;
 		}
-		const safeData = redact(data, apiKey) as JsonObject;
+		const safeData = redact(data || {}, apiKey) as JsonObject;
 		const apiError = (safeData.error || {}) as IDataObject;
 		const issues = Array.isArray(apiError.issues) ? (apiError.issues as IDataObject[]) : [];
 		const details = issues.map(
 			(issue) =>
 				`${Array.isArray(issue.path) ? issue.path.join('.') : issue.path}: ${issue.message}`,
 		);
-		const requestId = redact(data.request_id || responseHeaders['x-request-id'], apiKey);
-		if (requestId) details.push(`Request ID: ${requestId}`);
+		const safeRequestId = redact(requestId, apiKey);
+		if (requestId !== undefined) details.push(`Request ID: ${safeRequestId}`);
 		if (apiError.type) details.unshift(`Error type: ${apiError.type}`);
 		if (response.statusCode === 402) details.push('Add funds in Billing: https://console.nace.ai');
 		const message =
@@ -137,8 +167,9 @@ export async function getModels(this: ILoadOptionsFunctions): Promise<INodePrope
 		)
 		.map((model) => {
 			const id = String(model.id || model.name);
+			const name = credentials.backend === 'openrouter' ? String(model.name || id) : id;
 			return {
-				name: model.alias_for ? `${id} (alias of ${model.alias_for})` : id,
+				name: model.alias_for ? `${name} (alias of ${model.alias_for})` : name,
 				value: id,
 				description: String(model.description || ''),
 			};

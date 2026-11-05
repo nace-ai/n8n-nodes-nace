@@ -2,6 +2,12 @@
 
 ## 0.1.0
 
+- Enforce backend-specific image counts before requests: 4 on OpenRouter (DeepInfra), 8 on Nace.
+- Default to 5 retries with headerless backoff starting at 2 seconds, doubling to a 30-second cap; preserve retry-header handling and the 120-second total sleep budget.
+
+- Include OpenRouter decision models with `output_modalities=all`, displaying model names and descriptions while retaining Nace-only filtering.
+- Fall back from body request ID to response header, then generation ID for OpenRouter only, for successful outputs and API error descriptions. Accept only scalar IDs and use the first element of array-valued headers. Reject non-object success responses clearly; tolerate missing IDs and bodyless errors. Preserve returned usage costs, provider, and full score legends.
+
 - Use only each backend's own base URL field and default. Refuse OpenRouter hosts for Nace and non-OpenRouter hosts for OpenRouter before requests and credential tests; validate OpenRouter keys with `/v1/key` and filter its model list to Nace models.
 - Fix label names only for Route; Classify label expressions resolve per item. Reject missing Route labels and continue after per-item parameter errors.
 - Always append Unsure after Route labels; send low-confidence answers and continued errors there. Threshold 0 disables confidence-based fallback while preserving error isolation.
