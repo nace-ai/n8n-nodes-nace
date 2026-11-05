@@ -1,0 +1,123 @@
+{
+  "name": "Drex approval gate as an AI Agent tool",
+  "nodes": [
+    {
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "approval-assistant",
+      "name": "Approval assistant",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        300,
+        0
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "Can I automatically approve a refund for a duplicate charge of USD 12?",
+        "options": {
+          "systemMessage": "Before deciding, call the Drex approval gate with the proposed action. Report the gate result and confidence. Do not execute financial actions."
+        }
+      }
+    },
+    {
+      "id": "chat-model",
+      "name": "Chat model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        180,
+        260
+      ],
+      "parameters": {
+        "options": {},
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini"
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "id": "drex-approval-gate",
+      "name": "Drex approval gate",
+      "type": "n8n-nodes-nace.naceTool",
+      "typeVersion": 1,
+      "position": [
+        460,
+        260
+      ],
+      "parameters": {
+        "operation": "evaluate",
+        "model": "drex-v2.0",
+        "stateFormat": "text",
+        "stateText": "={{ $fromAI('proposedAction', 'The proposed action and relevant facts', 'string') }}",
+        "questionsMode": "json",
+        "questionsJson": "{\"allowed\": {\"type\": \"noul\", \"instructions\": \"Does the proposed action comply with this policy? Refunds for confirmed duplicate charges under USD 25 may be approved. Other actions require human review.\", \"criteria\": {\"true\": \"Allowed by policy\", \"false\": \"Requires human review\"}}}",
+        "options": {},
+        "toolDescription": "Evaluate whether a proposed action is allowed by refund policy. Returns a truth estimate and confidence.",
+        "descriptionType": "manual"
+      },
+      "credentials": {
+        "naceApi": {
+          "name": "Nace API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Approval assistant",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Approval assistant",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Drex approval gate": {
+      "ai_tool": [
+        [
+          {
+            "node": "Approval assistant",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

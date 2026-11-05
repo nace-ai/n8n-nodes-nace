@@ -1,0 +1,86 @@
+{
+  "name": "Check a synthetic invoice image with Drex Max",
+  "nodes": [
+    {
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "synthetic-invoice",
+      "name": "Synthetic invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{json:{source:'Synthetic invoice fixture'},binary:{invoice:{data:'iVBORw0KGgoAAAANSUhEUgAAAWgAAACMCAIAAADeJaSiAAAFCElEQVR4nO3ZwZEbMQwEQOWftJ0ByyMMdkVX93cJEiB187nPH4DQ5+0GgPsIDiAmOICY4ABiggOICQ4gJjiAmOAAYoIDiAkOICY4gJjgAGKCA4gJDiAmOICY4ABiggOICQ4gJjiA2Cg4Polz7VtfJz1fUQsbBMf3PV9RCxsEx/c9X1ELGwTH9z1fUQsbBMf3PV9RCxuav7PoF1z8Q3rs62OLi7WwQXDURiguLtbCBsFRG6G4uFgLGwRHbYTi4mItbBActRGKi4u1sEFw1EYoLj7XTraCCsFRG6G4+Fw72QoqBEdthOLic+1kK6gQHLURiovPtZOtoEJw1EYoLj7XTraCCsFRG6G4uFgLGwRHbYTi4mItbBActRGKi4u1sEFw1EYoLi7WwgbBURuhuLhYCxtGv8J//LP/5T/gSc9X1MIGwfF9z1fUwgbB8X3PV9TCBsHxfc9X1MIGwfF9z1fUwga/MyAmOICY4ABiggOICQ4gJjiAmOAAYoIDiAkOICY4gJjgAGKCA4gJDiAmOICY4ABiggOICQ4gJjiAmOAAYoIDiAkOICY4gJjgAGKCA4gJDiAmOICY4ABiggOICQ4gJjiA2Cg4PokfqT1vVVxcFN3G+Wt0V5OLLZq8UXHevfGv7HlU/NLAk9rzVsXFRdFtnL9GdzW52KLJGxXn3Rv/yp5HxS8NPKk9b1VcXBTdxvlrdFeTiy2avFFx3r3xr+x5VPzSwJPa81bFxUXRbZy/Rnc1udiiyRsV590b/8qeR8UvDTypPW9VXFwU3cb5a3RXk4stmrxRcd698a/sublX0mV0HT9y7t4znL3V81u38Tkq7lz8+ptdLfbc3CvpsjjwY+fuPcPZWz2/dRufo+LOxa+/2dViz829ki6LAz927t4znL3V81u38Tkq7lz8+ptdLfbc3CvpsjjwY+fuPcPZWz2/dRufo+LOxa+/2dViz829ki6LAz927t4znL3V81u38Tkq7lz8+ptdLfbc3CvpsjjwZPHZ5KCiSVd78z52G9FBN86719Viz829ki6LA08Wn00OKpp0tTfvY7cRHXTjvHtdLfbc3CvpsjjwZPHZ5KCiSVd78z52G9FBN86719Viz829ki6LA08Wn00OKpp0tTfvY7cRHXTjvHtdLfbc3CvpsjjwZPHZ5KCiSVd78z52G9FBN86719Viz829ki6LAz927t4znO11dcVtFN93Urs3794rLPbc3Kv3wMWtiufuPcPZXldX3EbxfSe1e/PuvcJiz829eg9c3Kp47t4znO11dcVtFN93Urs3794rLPbc3Kv3wMWtiufuPcPZXldX3EbxfSe1e/PuvcJiz829eg9c3Kp47t4znO11dcVtFN93Urs3794rLPbc3GvwwGd7506+TnqOTM7dqy0OeMW859rzVr8574Tg+P7rpOfI5Ny92uKAV8x7rj1v9ZvzTgiO779Oeo5Mzt2rLQ54xbzn2vNWvznvhOD4/uuk58jk3L3a4oBXzHuuPW/1m/NOCI7vv056jkzO3astDnjFvOfa81a/Oe/Ec/8aAP4bggOICQ4gJjiAmOAAYoIDiAkOICY4gJjgAGKCA4gJDiAmOICY4ABiggOICQ4gJjiAmOAAYoIDiAkOICY4gJjgAGKCA4gJDiAmOICY4ABiggOICQ4gJjiAmOAAYoIDiAkOICY4gJjgAGKCA4gJDiAmOICY4ABiggOICQ4gJjiA2F8Rwn2Ob73lZgAAAABJRU5ErkJggg==',mimeType:'image/png',fileName:'synthetic-invoice.png'}}}];"
+      }
+    },
+    {
+      "id": "check-invoice",
+      "name": "Check invoice",
+      "type": "n8n-nodes-nace.nace",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "operation": "evaluate",
+        "model": "drex-max",
+        "stateFormat": "text",
+        "stateText": "Inspect Image 1, a synthetic invoice.",
+        "imageProperties": "invoice",
+        "questionsMode": "json",
+        "questionsJson": "{\"invoice\": {\"type\": \"noul\", \"instructions\": \"Does Image 1 show an invoice with a readable total?\", \"criteria\": {\"true\": \"Invoice with readable total\", \"false\": \"Missing invoice or total\"}}, \"total\": {\"type\": \"choice\", \"instructions\": \"What is the total in Image 1?\", \"criteria\": {\"USD 120.00\": null, \"Other or unreadable\": null}}}",
+        "options": {
+          "includeOtherFields": true
+        }
+      },
+      "credentials": {
+        "naceApi": {
+          "name": "Nace API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Synthetic invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Synthetic invoice": {
+      "main": [
+        [
+          {
+            "node": "Check invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}

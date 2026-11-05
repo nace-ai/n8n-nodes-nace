@@ -1,0 +1,155 @@
+{
+  "name": "Support ticket triage with Drex",
+  "nodes": [
+    {
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "synthetic-tickets",
+      "name": "Synthetic tickets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "return [{json:{ticket:'I was charged twice; please refund the duplicate.'}},{json:{ticket:'The app crashes when I upload a photo.'}},{json:{ticket:'Hello!'}}];"
+      }
+    },
+    {
+      "id": "route-tickets",
+      "name": "Route tickets",
+      "type": "n8n-nodes-nace.nace",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "operation": "route",
+        "model": "drex-v2.0",
+        "stateFormat": "text",
+        "stateText": "={{ $json.ticket }}",
+        "instructions": "Which team should handle this ticket?",
+        "labels": {
+          "label": [
+            {
+              "label": "billing",
+              "description": "Payments, invoices, and refunds"
+            },
+            {
+              "label": "support",
+              "description": "Technical problems"
+            }
+          ]
+        },
+        "confidenceThreshold": 0.8,
+        "options": {
+          "includeOtherFields": true
+        }
+      },
+      "credentials": {
+        "naceApi": {
+          "name": "Nace API"
+        }
+      }
+    },
+    {
+      "id": "billing",
+      "name": "Billing",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        740,
+        -160
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "support",
+      "name": "Support",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        740,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "manual-review",
+      "name": "Manual review",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        740,
+        160
+      ],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          {
+            "node": "Synthetic tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Synthetic tickets": {
+      "main": [
+        [
+          {
+            "node": "Route tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route tickets": {
+      "main": [
+        [
+          {
+            "node": "Billing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Support",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Manual review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "tags": []
+}
