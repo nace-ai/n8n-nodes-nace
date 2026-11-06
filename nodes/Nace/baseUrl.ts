@@ -33,7 +33,7 @@ export function resolveBaseUrl(
 	} catch {
 		throw new NodeOperationError(
 			node,
-			itemText(`${parameter} must be an absolute HTTP or HTTPS URL`, itemIndex),
+			itemText(`'${parameter}' must be an absolute HTTP or HTTPS URL`, itemIndex),
 			{
 				itemIndex,
 			},
@@ -45,7 +45,7 @@ export function resolveBaseUrl(
 		throw new NodeOperationError(
 			node,
 			itemText(
-				`${parameter} must use HTTPS. Only Nace on localhost, 127.0.0.1, or [::1] may use HTTP.`,
+				`'${parameter}' must use HTTPS. Only Nace on localhost, 127.0.0.1, or [::1] may use HTTP.`,
 				itemIndex,
 			),
 			{ itemIndex },
@@ -61,14 +61,14 @@ export function resolveBaseUrl(
 	)
 		throw new NodeOperationError(
 			node,
-			itemText(`${parameter} must not include userinfo, a query, or a fragment`, itemIndex),
+			itemText(`'${parameter}' must not include userinfo, a query, or a fragment`, itemIndex),
 			{ itemIndex },
 		);
 	if (openRouter && host !== 'openrouter.ai' && !host.endsWith('.openrouter.ai')) {
 		throw new NodeOperationError(
 			node,
 			itemText(
-				'OpenRouter Base URL must use openrouter.ai or a subdomain of openrouter.ai',
+				"'OpenRouter Base URL' must use openrouter.ai or a subdomain of openrouter.ai",
 				itemIndex,
 			),
 			{ itemIndex },
@@ -78,7 +78,7 @@ export function resolveBaseUrl(
 		throw new NodeOperationError(
 			node,
 			itemText(
-				'Nace Base URL must not use an openrouter.ai host. Select the OpenRouter backend or change Base URL.',
+				"'Base URL' must not use an openrouter.ai host. Set 'Backend' to OpenRouter or change 'Base URL'.",
 				itemIndex,
 			),
 			{ itemIndex },

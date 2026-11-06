@@ -139,11 +139,11 @@ The model dropdown skips entries explicitly marked retired and identifies aliase
 
 The default model field is `drex-v2.0`. Use a `nace-ai/` ID for OpenRouter. To enter an ID absent from the dropdown, switch the field to an expression, such as `={{ 'drex-max' }}`. The list remains open to new models.
 
-Images require a model whose ID contains `drex-max`. Enter binary property names in **Image Binary Properties**, such as `front,back`.
+Images require a model whose ID contains `drex-max`. Enter input binary field names in **Input Binary Fields**, such as `front,back`.
 
-The node reads n8n binary data, including externally stored binary data. It sends data URLs in the configured order. Refer to them as **Image 1**, **Image 2**, and so on. Reversing the property names reverses image numbering.
+The node reads n8n binary data, including externally stored binary data. It sends data URLs in the configured order. Refer to them as **Image 1**, **Image 2**, and so on. Reversing the field names reverses image numbering.
 
-For an invoice, use `drex-max` and binary property `invoice`. Ask `Does Image 1 show an invoice with a readable total?`.
+For an invoice, use `drex-max` and binary field `invoice`. Ask `Does Image 1 show an invoice with a readable total?`.
 
 Images on other models are refused before an API request. AI Agent tool calls cannot supply binary attachments. Use a normal workflow node for image evaluation.
 
@@ -185,16 +185,14 @@ Timeouts and transport errors are surfaced without retrying.
 
 ### Continuing after errors
 
-Enable **On Error > Continue** to keep processing later input items. This includes failures while resolving parameter expressions. Items that cannot be processed contain a message and description and retain item pairing. Messages name the relevant parameter and include `[Item N]` when the item is known. **Include Other Input Fields** also retains input JSON and binary attachments on continued errors.
+Enable **On Error > Continue** to keep processing later input items. This includes failures while resolving parameter expressions. Items that cannot be processed contain the message in `json.error` and, when available, details in `json.description` (including issue paths and request IDs). Messages name the relevant parameter and include `[Item N]` when the item is known. **Include Other Input Fields** also retains input JSON and binary attachments on continued errors. Error fields take precedence on collisions, and items retain n8n pairing.
 
 | Route error setting | Destination |
 | --- | --- |
-| **Continue** | Final **Unsure** output, even at threshold `0`. Label outputs receive successful decisions only. |
-| **Continue (using error output)** | n8n moves error items from Unsure to its separate **Error** output. |
+| **Continue** | Final **Unsure** output, even at threshold `0`, with full error JSON. |
+| **Continue (using error output)** | n8n moves failed items from Unsure to its separate **Error** output. |
 
-The node sets `item.error`. n8n-core checks this independently of JSON fields. In n8n-core 2.46.5, a bare `json.error` is recognized only when all JSON keys are among `error`, `message`, and `details`. Relying on `json.error` alone would fail with input fields or a description.
-
-This behavior was checked against the locally cached n8n-core 2.46.5 `WorkflowExecute.handleNodeErrorOutput` implementation and the installed n8n-workflow output helper. Tool invocations collect continued errors on their single output.
+Label outputs receive successful decisions only. With **Continue**, downstream nodes can check `$json.error`; descriptions and optional input fields remain available. With **Continue (using error output)**, the node sets `item.error` for n8n routing, and n8n normalizes the item's JSON to `{ "error": "message" }`. Pairing and optional binary attachments remain. Tool invocations collect results on their single output before n8n applies the selected error handling.
 
 ## Errors
 
@@ -243,7 +241,7 @@ The package has no runtime dependencies. It uses `n8n-workflow` as a peer. Tests
 
 CI and publishing both run unit tests before proceeding. The development CLI is pinned to `0.55.5`. Workflow actions are pinned by commit SHA. Checkouts have read-only permissions and do not persist credentials.
 
-Publishing runs on tags matching `v*.*.*` or by manual dispatch. A build job installs dependencies, lints, tests, builds, and packs the package without OIDC publishing permission. It uploads the tested tarball. A separate publish job downloads that artifact and runs `npm publish <tarball> --provenance --access public --ignore-scripts`. It does not install dependencies or execute package lifecycle scripts.
+Publishing runs on version tags matching `*.*.*` (the format `npm run release` creates, such as `1.2.3`) or by manual dispatch. A build job installs dependencies, lints, tests, builds, and packs the package without OIDC publishing permission. It uploads the tested tarball. A separate publish job downloads that artifact and runs `npm publish <tarball> --provenance --access public --ignore-scripts`. It does not install dependencies or execute package lifecycle scripts.
 
 Before release, configure npm trusted publishing for owner `nace-ai`, repository `n8n-nodes-nace`, workflow `publish.yml`, and environment `npm-publish`. Create that GitHub environment and require reviewers. The publish job uses GitHub OIDC; no `NPM_TOKEN` is needed. A manual run publishes the selected ref after checks and environment approval. Development checks do not publish the package.
 

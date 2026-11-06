@@ -1,6 +1,6 @@
 import type { IDataObject, INode } from 'n8n-workflow';
 import type { Questions } from './questions';
-import { isObject, unexpected } from './safety';
+import { isObject, scalarId, unexpected } from './safety';
 
 const unit = (value: unknown): value is number =>
 	typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
@@ -13,7 +13,14 @@ export function validateAnswers(
 	itemIndex: number,
 ): Record<string, IDataObject> {
 	const reject = (id: string, reason: string): never => {
-		throw unexpected(node, secret, backend, `Questions: Question ${id}: ${reason}`, itemIndex);
+		throw unexpected(
+			node,
+			secret,
+			backend,
+			`'Questions': Question ${id}: ${reason}`,
+			itemIndex,
+			scalarId(response.request_id),
+		);
 	};
 	const answers = response.answers;
 	if (!isObject(answers)) reject(Object.keys(questions)[0], 'expected an answers object');

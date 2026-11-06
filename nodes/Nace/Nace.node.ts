@@ -10,7 +10,7 @@ import { getModels, request } from './api';
 import { properties } from './properties';
 import { attachImages } from './images';
 import { validateAnswers } from './response';
-import { cleanInput, cleanJson, operationFailure, unexpected } from './safety';
+import { cleanInput, cleanJson, operationFailure, scalarId, unexpected } from './safety';
 import { buildQuestions, choices, fail, parse } from './questions';
 import type { Choice, Questions } from './questions';
 
@@ -63,16 +63,20 @@ export class Nace implements INodeType {
 					: [];
 				if (isRoute) {
 					if (!configuredLabels.length)
-						fail(this, index, 'Labels: Route requires at least one label');
+						fail(this, index, "'Labels': Route requires at least one label");
 					if (configuredLabels.some((entry) => String(entry.label).startsWith('=')))
-						fail(this, index, 'Labels: Route label names must be fixed values, not expressions');
+						fail(this, index, "'Labels': Route label names must be fixed values, not expressions");
 					if (
 						labels.length !== configuredLabels.length ||
 						labels.some((entry, i) => entry.label !== configuredLabels[i].label)
 					)
-						fail(this, index, 'Labels: Route label names must stay fixed across input items');
+						fail(this, index, "'Labels': Route label names must stay fixed across input items");
 					if (labels.some((entry) => entry.label.trim().toLowerCase() === 'unsure'))
-						fail(this, index, 'Labels: Route label Unsure is reserved for the final Unsure output');
+						fail(
+							this,
+							index,
+							"'Labels': Route label Unsure is reserved for the final Unsure output",
+						);
 					choices(this, index, labels);
 				}
 				const model = this.getNodeParameter('model', index, 'drex-v2.0') as string;
@@ -80,7 +84,7 @@ export class Nace implements INodeType {
 					fail(
 						this,
 						index,
-						`Model Name or ID: OpenRouter models must start with nace-ai/. Try nace-ai/${model}.`,
+						`'Model Name or ID': OpenRouter models must start with nace-ai/. Try nace-ai/${model}.`,
 					);
 				const format = this.getNodeParameter('stateFormat', index, 'text');
 				const state =
@@ -110,13 +114,13 @@ export class Nace implements INodeType {
 					fail(
 						this,
 						index,
-						'Image Binary Properties: Images require a drex-max model (nace-ai/drex-max on OpenRouter). Select a Max model or remove the image properties.',
+						"'Input Binary Fields': Images require a drex-max model (nace-ai/drex-max on OpenRouter). Select a Max model in 'Model Name or ID' or clear 'Input Binary Fields'.",
 					);
 				await attachImages(this, index, body, imageNames, openRouter);
 				const timeout = Number(options.timeout ?? 60000);
 				const retries = Number(options.maxRetries ?? 5);
 				if (!Number.isFinite(timeout) || timeout <= 0 || !Number.isFinite(retries))
-					fail(this, index, 'Timeout must be positive and Max Retries must be a finite number');
+					fail(this, index, "'Timeout' must be positive and 'Max Retries' must be a finite number");
 				const response = await request(
 					this,
 					'POST',
@@ -141,12 +145,13 @@ export class Nace implements INodeType {
 							this.getNode(),
 							secret,
 							openRouter ? 'OpenRouter' : 'Nace',
-							'Questions: Question route: confidence is required for routing',
+							"'Questions': Question route: confidence is required for routing",
 							index,
+							scalarId(response.request_id),
 						);
 					const threshold = Number(this.getNodeParameter('confidenceThreshold', index, 0.5));
 					if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1)
-						fail(this, index, 'Confidence Threshold must be between 0 and 1');
+						fail(this, index, "'Confidence Threshold' must be between 0 and 1");
 					target =
 						answer.confidence < threshold
 							? labels.length
@@ -155,7 +160,7 @@ export class Nace implements INodeType {
 						fail(
 							this,
 							index,
-							`Labels: Drex returned an unconfigured route label: ${answer.choice}`,
+							`'Labels': Drex returned an unconfigured route label: ${answer.choice}`,
 						);
 				}
 				const fields: IDataObject = { ...response };
@@ -166,7 +171,12 @@ export class Nace implements INodeType {
 						Object.entries(answers).map(([id, answer]) => [
 							id,
 							{
-								value: answer.choice ?? answer.score ?? answer.noul,
+								value:
+									answer.type === 'noul'
+										? answer.noul
+										: answer.type === 'choice'
+											? answer.choice
+											: answer.score,
 								confidence: answer.confidence,
 							},
 						]),
@@ -182,14 +192,16 @@ export class Nace implements INodeType {
 			} catch (error) {
 				const failure = operationFailure(this.getNode(), secret, error, index);
 				if (!this.continueOnFail()) throw failure;
+				const inputFields = options.includeOtherFields ? { ...cleanInput(item.json, secret) } : {};
+				delete inputFields.description;
 				outputs[!isTool && isRoute ? configuredLabels.length : 0].push({
 					json: {
-						...(options.includeOtherFields ? cleanInput(item.json, secret) : {}),
+						...inputFields,
 						error: failure.message,
-						description: 'description' in failure ? failure.description : undefined,
+						...(failure.description ? { description: failure.description } : {}),
 					},
 					...(options.includeOtherFields && item.binary ? { binary: item.binary } : {}),
-					error: failure,
+					...(this.getNode().onError === 'continueErrorOutput' ? { error: failure } : {}),
 					pairedItem: { item: index },
 				});
 			}

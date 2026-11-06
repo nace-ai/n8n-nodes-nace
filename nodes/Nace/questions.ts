@@ -25,14 +25,14 @@ export function parse(
 	try {
 		return JSON.parse(value);
 	} catch {
-		return fail(context, index, `${label} must be valid JSON`);
+		return fail(context, index, `'${label}' must be valid JSON`);
 	}
 }
 export function choices(context: IExecuteFunctions, index: number, entries: Choice[]): IDataObject {
-	if (!entries.length) fail(context, index, 'Labels / Choices: Add at least one choice label');
+	if (!entries.length) fail(context, index, "'Labels' / 'Choices': Add at least one choice label");
 	const labels = entries.map((entry) => String(entry.label || '').trim());
 	if (labels.some((label) => !label) || new Set(labels).size !== labels.length)
-		fail(context, index, 'Labels / Choices: Choice labels must be nonempty and unique');
+		fail(context, index, "'Labels' / 'Choices': Choice labels must be nonempty and unique");
 	return Object.fromEntries(entries.map((entry, i) => [labels[i], entry.description || null]));
 }
 export function buildQuestions(
@@ -50,7 +50,7 @@ export function buildQuestions(
 		const entries = param('questions.question', []) as IDataObject[];
 		const ids = entries.map((entry) => String(entry.id || '').trim());
 		if (ids.some((id) => !id) || new Set(ids).size !== ids.length)
-			fail(context, index, 'Questions: Question IDs must be nonempty and unique');
+			fail(context, index, "'Questions': Question IDs must be nonempty and unique");
 		raw = Object.fromEntries(
 			entries.map((entry, i) => [
 				ids[i],
@@ -88,19 +88,19 @@ export function buildQuestions(
 		};
 	}
 	if (!raw || typeof raw !== 'object' || Array.isArray(raw))
-		fail(context, index, 'Questions must be an object keyed by question ID');
+		fail(context, index, "'Questions' must be an object keyed by question ID");
 	const entries = Object.entries(raw);
 	if (entries.length < 1 || entries.length > 512)
-		fail(context, index, 'Questions: Provide between 1 and 512 questions');
+		fail(context, index, "'Questions': Provide between 1 and 512 questions");
 	return Object.fromEntries(
 		entries.map(([id, value]) => {
 			if (!id.trim() || !value || typeof value !== 'object' || Array.isArray(value))
-				fail(context, index, `Questions: Invalid question: ${id}`);
+				fail(context, index, `'Questions': Invalid question: ${id}`);
 			const question = value as Question;
 			if (!['noul', 'choice', 'score'].includes(question.type))
-				fail(context, index, `Questions: Question ${id}: type must be noul, choice, or score`);
+				fail(context, index, `'Questions': Question ${id}: type must be noul, choice, or score`);
 			if (question.instructions != null && typeof question.instructions !== 'string')
-				fail(context, index, `Questions: Question ${id}: instructions must be a string`);
+				fail(context, index, `'Questions': Question ${id}: instructions must be a string`);
 			let criteria = question.criteria ?? (question.type === 'noul' ? {} : undefined);
 			if (question.type === 'score') {
 				if (
@@ -111,11 +111,11 @@ export function buildQuestions(
 					fail(
 						context,
 						index,
-						`Questions: Question ${id}: score criteria must be a nonempty array of level descriptions ordered low to high`,
+						`'Questions': Question ${id}: score criteria must be a nonempty array of level descriptions ordered low to high`,
 					);
 			} else {
 				if (!criteria || typeof criteria !== 'object' || Array.isArray(criteria))
-					fail(context, index, `Questions: Question ${id}: criteria must be an object`);
+					fail(context, index, `'Questions': Question ${id}: criteria must be an object`);
 				const values = Object.entries(criteria);
 				if (
 					question.type === 'choice' &&
@@ -128,7 +128,7 @@ export function buildQuestions(
 					fail(
 						context,
 						index,
-						`Questions: Question ${id}: choice criteria must map labels to descriptions or null`,
+						`'Questions': Question ${id}: choice criteria must map labels to descriptions or null`,
 					);
 				if (
 					question.type === 'noul' &&
@@ -139,7 +139,7 @@ export function buildQuestions(
 					fail(
 						context,
 						index,
-						`Questions: Question ${id}: noul criteria may contain true and false meanings as strings`,
+						`'Questions': Question ${id}: noul criteria may contain true and false meanings as strings`,
 					);
 				if (question.type === 'choice')
 					criteria = Object.fromEntries(

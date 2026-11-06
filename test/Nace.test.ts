@@ -8,6 +8,7 @@ import type {
 	IDataObject,
 	INodeExecutionData,
 	INodeProperties,
+	IHttpRequestOptions,
 } from 'n8n-workflow';
 import { NodeApiError, NodeOperationError, NodeHelpers, Expression } from 'n8n-workflow';
 import { Nace } from '../nodes/Nace/Nace.node';
@@ -56,6 +57,33 @@ function response(
 			...extra,
 		},
 	};
+}
+// Model n8n-core 2.46.5 WorkflowExecute.normalizeNodeErrors before downstream assertions.
+function normalizeNodeErrors(outputs: INodeExecutionData[][]): INodeExecutionData[][] {
+	return outputs.map((items) =>
+		items.map((item) => {
+			const error =
+				item.json.$error !== undefined && item.json.$json !== undefined
+					? (item.json.$error as NodeApiError | NodeOperationError)
+					: item.error;
+			return error === undefined ? item : { ...item, error, json: { error: error.message } };
+		}),
+	);
+}
+// Model handleNodeErrorOutput's classification before normalizeNodeErrors.
+function splitErrorOutput(outputs: INodeExecutionData[][]): INodeExecutionData[][] {
+	const errors: INodeExecutionData[] = [];
+	const regular = outputs.map((items) =>
+		items.filter((item) => {
+			const isError =
+				item.error ||
+				(item.json.error &&
+					Object.keys(item.json).every((key) => ['error', 'message', 'details'].includes(key)));
+			if (isError) errors.push(item);
+			return !isError;
+		}),
+	);
+	return [...regular, errors];
 }
 function fake(
 	params: Record<string, unknown> = {},
@@ -136,7 +164,8 @@ function fake(
 		context: context as unknown as IExecuteFunctions,
 		http,
 		raw: context,
-		run: () => new Nace().execute.call(context as unknown as IExecuteFunctions),
+		run: async () =>
+			normalizeNodeErrors(await new Nace().execute.call(context as unknown as IExecuteFunctions)),
 	};
 }
 async function credentialCheck(
@@ -334,6 +363,36 @@ describe('typed evaluation', () => {
 			},
 		});
 	});
+	it.each([
+		{
+			question: noul,
+			answer: { type: 'noul', noul: 0, choice: 'approved', confidence: 1 },
+			value: 0,
+		},
+		{
+			question: noul,
+			answer: { type: 'noul', noul: 0, score: 99, confidence: 1 },
+			value: 0,
+		},
+		{
+			question: choice,
+			answer: { type: 'choice', choice: 'support', noul: 0, score: 99, confidence: 1 },
+			value: 'support',
+		},
+		{
+			question: score,
+			answer: { type: 'score', score: 0, choice: 'approved', noul: 1, confidence: 1 },
+			value: 0,
+		},
+	])(
+		'simplifies only the validated $answer.type field despite conflicting fields',
+		async ({ question, answer, value }) => {
+			const f = fake({ questionsJson: { decision: question }, options: { simplify: true } });
+			f.http.mockResolvedValue(response({ decision: answer }));
+			const result = await f.run();
+			expect(result[0][0].json.answers).toEqual({ decision: { value, confidence: 1 } });
+		},
+	);
 	it('supports JSON state, whole input and simplify with other input fields', async () => {
 		const f = fake({
 			questionsJson: { noul, choice, score },
@@ -432,6 +491,149 @@ describe('images and limits', () => {
 });
 
 describe('errors, retries, and routing', () => {
+	it.each(
+		['nace', 'openrouter'].flatMap((backend) =>
+			['evaluate', 'route', 'tool'].flatMap((mode) =>
+				[false, true].map((includeOtherFields) => ({ backend, mode, includeOtherFields })),
+			),
+		),
+	)(
+		'preserves downstream $backend $mode error details after normalization (includeOtherFields=$includeOtherFields)',
+		async ({ backend, mode, includeOtherFields }) => {
+			const input = {
+				...imageItem,
+				json: {
+					ticket: 'Help with billing',
+					customerId: 'customer-42',
+					error: 'old input error',
+					description: 'old input description',
+				},
+			};
+			const f = fake(
+				{
+					operation: mode === 'evaluate' ? 'evaluate' : 'route',
+					labels: { label: [{ label: 'billing' }, { label: 'support' }] },
+					options: { includeOtherFields },
+				},
+				{ backend },
+				[input],
+			);
+			const getNode = f.raw.getNode;
+			f.raw.getNode = () => ({ ...getNode(), onError: 'continueRegularOutput' as const });
+			if (mode === 'tool') {
+				const getNode = f.raw.getNode;
+				f.raw.getNode = () => ({ ...getNode(), type: 'n8n-nodes-nace.naceTool' });
+			}
+			f.raw.continueOnFail = () => true;
+			f.http.mockResolvedValue({
+				statusCode: 422,
+				headers: {},
+				body: {
+					error: {
+						message: 'Invalid request',
+						issues: [
+							{ path: ['questions', 'q', 'instructions'], message: 'Must be a string' },
+							{ path: 'model', message: 'Unknown model' },
+						],
+					},
+					request_id: 'req-continued-422',
+				},
+			});
+			const outputs = await f.run();
+			const target = mode === 'route' ? 2 : 0;
+			expect(outputs.flat()).toHaveLength(1);
+			const item = outputs[target][0];
+			expect(item).not.toHaveProperty('error');
+			expect(item.json).toEqual({
+				...(includeOtherFields ? { ticket: 'Help with billing', customerId: 'customer-42' } : {}),
+				error: 'Invalid request [Item 1]',
+				description:
+					'questions.q.instructions: Must be a string\nmodel: Unknown model\nRequest ID: req-continued-422 [Item 1]',
+			});
+			expect(item.binary).toEqual(includeOtherFields ? input.binary : undefined);
+			expect(item.pairedItem).toEqual({ item: 0 });
+			expect(input.json.error).toBe('old input error');
+			expect(input.json.description).toBe('old input description');
+		},
+	);
+	it.each(
+		['nace', 'openrouter'].flatMap((backend) =>
+			['evaluate', 'route', 'tool'].flatMap((mode) =>
+				[false, true].map((includeOtherFields) => ({ backend, mode, includeOtherFields })),
+			),
+		),
+	)(
+		'routes $backend $mode failures to the Error output before normalization (includeOtherFields=$includeOtherFields)',
+		async ({ backend, mode, includeOtherFields }) => {
+			const f = fake(
+				{
+					operation: mode === 'evaluate' ? 'evaluate' : 'route',
+					labels: { label: [{ label: 'billing' }, { label: 'support' }] },
+					options: { includeOtherFields },
+				},
+				{ backend },
+				[{ ...imageItem, json: { ticket: 'Help', customerId: 'customer-42' } }, { json: {} }],
+			);
+			const getNode = f.raw.getNode;
+			f.raw.getNode = () => ({
+				...getNode(),
+				...(mode === 'tool' ? { type: 'n8n-nodes-nace.naceTool' } : {}),
+				onError: 'continueErrorOutput' as const,
+			});
+			f.raw.continueOnFail = () => true;
+			f.http.mockResolvedValueOnce(response({}, 422));
+			const raw = await new Nace().execute.call(f.context);
+			const target = mode === 'route' ? 2 : 0;
+			const failed = raw[target][0];
+			expect(failed.error).toBeInstanceOf(NodeApiError);
+			expect(failed.json.error).toBe('Drex API returned status 422 [Item 1]');
+			expect(failed.json.description).toContain('Request ID: req-test');
+			if (includeOtherFields)
+				expect(failed.json).toMatchObject({ ticket: 'Help', customerId: 'customer-42' });
+			const downstream = normalizeNodeErrors(splitErrorOutput(raw));
+			const errors = downstream.at(-1)!;
+			expect(errors).toHaveLength(1);
+			expect(errors[0].json).toEqual({ error: 'Drex API returned status 422 [Item 1]' });
+			expect(errors[0].pairedItem).toEqual({ item: 0 });
+			expect(errors[0].binary).toEqual(includeOtherFields ? imageItem.binary : undefined);
+			const successful = downstream.slice(0, -1).flat();
+			expect(successful).toHaveLength(1);
+			expect(successful[0]).not.toHaveProperty('error');
+			expect(successful[0].pairedItem).toEqual({ item: 1 });
+			if (mode === 'route') expect(downstream[2]).toEqual([]);
+		},
+	);
+	it('omits an unavailable description from a continued transport error', async () => {
+		const f = fake();
+		f.raw.continueOnFail = () => true;
+		f.http.mockRejectedValue(new Error('Connection failed'));
+		const result = await f.run();
+		expect(result[0][0].json).toEqual({ error: 'Connection failed [Item 1]' });
+		expect(result[0][0]).not.toHaveProperty('error');
+		expect(result[0][0].pairedItem).toEqual({ item: 0 });
+	});
+	it('drops an input description when a regular continued transport error has none', async () => {
+		const input = {
+			...imageItem,
+			json: { ticket: 'Help', customerId: 'customer-42', description: 'Unrelated input text' },
+		};
+		const f = fake({ options: { includeOtherFields: true } }, {}, [input]);
+		const getNode = f.raw.getNode;
+		f.raw.getNode = () => ({ ...getNode(), onError: 'continueRegularOutput' as const });
+		f.raw.continueOnFail = () => true;
+		f.http.mockRejectedValue(new Error('Connection failed'));
+		const result = await f.run();
+		expect(result[0][0].json).toEqual({
+			ticket: 'Help',
+			customerId: 'customer-42',
+			error: 'Connection failed [Item 1]',
+		});
+		expect(result[0][0].json).not.toHaveProperty('description');
+		expect(result[0][0]).not.toHaveProperty('error');
+		expect(result[0][0].pairedItem).toEqual({ item: 0 });
+		expect(result[0][0].binary).toEqual(input.binary);
+		expect(input.json.description).toBe('Unrelated input text');
+	});
 	it('includes every 422 issue path and message and the request ID', async () => {
 		const f = fake();
 		f.http.mockResolvedValue({
@@ -537,7 +739,8 @@ describe('errors, retries, and routing', () => {
 			.mockResolvedValueOnce(response({ route: answerSet.choice }));
 		const result = await f.run();
 		expect(result[1][0]).toMatchObject({ pairedItem: { item: 0 } });
-		expect(result[1][0].error).toBeInstanceOf(NodeApiError);
+		expect(result[1][0].json.error).toBe('Drex API returned status 422 [Item 1]');
+		expect(result[1][0]).not.toHaveProperty('error');
 		expect(result[0][0].pairedItem).toEqual({ item: 1 });
 	});
 	it('exposes dynamic output names matching configured label order', () => {
@@ -838,7 +1041,7 @@ describe('review regressions', () => {
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
 		expect(result[0][0]).toMatchObject({
-			json: { error: 'Labels: Route requires at least one label [Item 1]' },
+			json: { error: "'Labels': Route requires at least one label [Item 1]" },
 			pairedItem: { item: 0 },
 		});
 	});
@@ -890,20 +1093,23 @@ describe('review regressions', () => {
 		expect(body(f.http, 0).questions.route.criteria).toEqual({ support: 'Description 0' });
 		expect(body(f.http, 1).questions.route.criteria).toEqual({ support: 'Description 1' });
 	});
-	it('always places continued Route errors on Unsure and preserves the marker for n8n Error output handling', async () => {
+	it('marks continued Route errors for n8n Error output handling and normalization', async () => {
 		const f = fake({
 			operation: 'route',
 			labels: { label: [{ label: 'billing' }, { label: 'support' }] },
 		});
+		const getNode = f.raw.getNode;
+		f.raw.getNode = () => ({ ...getNode(), onError: 'continueErrorOutput' as const });
 		f.raw.continueOnFail = () => true;
 		f.http.mockResolvedValue(response({}, 422));
 		const result = await f.run();
 		const error = result[2][0];
 		expect(error.error).toBeInstanceOf(NodeApiError);
-		expect(error.json.error).toBeTruthy();
+		expect(error.json).toEqual({ error: 'Drex API returned status 422 [Item 1]' });
+		expect(error.error?.description).toContain('Request ID: req-test');
 		expect(error.pairedItem).toEqual({ item: 0 });
 		expect(result.flat()).toHaveLength(1);
-		// n8n-core 2.46.5 handleNodeErrorOutput scans every main output for this marker.
+		// n8n-core 2.46.5 handleNodeErrorOutput recognizes item.error on every main output.
 		const configuredNode = { ...f.raw.getNode(), onError: 'continueErrorOutput' as const };
 		const description = new Nace().description;
 		const workflow = {
@@ -971,7 +1177,9 @@ describe('review regressions', () => {
 		f.http.mockResolvedValue(response({}, 422));
 		const result = await f.run();
 		expect(result).toHaveLength(1);
-		expect(result[0][0].error).toBeInstanceOf(NodeApiError);
+		expect(result[0][0]).not.toHaveProperty('error');
+		expect(result[0][0].json.error).toBe('Drex API returned status 422 [Item 1]');
+		expect(result[0][0].json.description).toContain('Request ID: req-test');
 	});
 	it.each([false, true])(
 		'redacts echoed credential values from API errors and continued results (continue=%s)',
@@ -1188,10 +1396,10 @@ describe('backend and permanent Unsure regressions', () => {
 			const f = fake({}, credentials);
 			const expectedMessage =
 				credentials.backend === 'nace'
-					? 'Nace Base URL must not use an openrouter.ai host'
+					? "'Base URL' must not use an openrouter.ai host"
 					: credentials.openRouterBaseUrl.includes('@')
-						? 'Base URL must not include userinfo'
-						: 'OpenRouter Base URL must use openrouter.ai or a subdomain of openrouter.ai';
+						? "'OpenRouter Base URL' must not include userinfo"
+						: "'OpenRouter Base URL' must use openrouter.ai or a subdomain of openrouter.ai";
 			await expect(f.run()).rejects.toBeInstanceOf(NodeOperationError);
 			await expect(f.run()).rejects.toThrow(expectedMessage);
 			await expect(getModels.call(f.context as never)).rejects.toThrow(expectedMessage);
@@ -1290,8 +1498,12 @@ describe('backend and permanent Unsure regressions', () => {
 		expect(result[1]).toEqual([]);
 		expect(result[2][0]).toMatchObject({
 			pairedItem: { item: 0 },
-			error: expect.any(NodeApiError),
+			json: {
+				error: 'Drex API returned status 422 [Item 1]',
+				description: expect.stringContaining('Request ID: req-test'),
+			},
 		});
+		expect(result[2][0]).not.toHaveProperty('error');
 	});
 	it('uses threshold 0 to keep low-confidence decisions on their label output', async () => {
 		const f = fake({
@@ -1503,7 +1715,9 @@ describe.each(['nace', 'openrouter'])('%s response validation and missing IDs', 
 				expect(error.message).toBe(
 					`Unexpected response from ${backend === 'openrouter' ? 'OpenRouter' : 'Nace'} [Item 1]`,
 				);
-				expect(error.description).toBe('Expected a JSON object in the response body. [Item 1]');
+				expect(error.description).toBe(
+					'Expected a JSON object in the response body. Retry the request. If it happens again, contact Nace support and include the request ID when available.\nRequest ID: req-header [Item 1]',
+				);
 				return true;
 			});
 		},
@@ -1697,7 +1911,9 @@ describe('security review round one', () => {
 		{ backend: 'openrouter', openRouterBaseUrl: 'http://openrouter.ai/api' },
 	])('requires HTTPS on a non-local backend: $backend', async (credentials) => {
 		const f = fake({}, credentials);
-		await expect(f.run()).rejects.toThrow('Base URL must use HTTPS');
+		await expect(f.run()).rejects.toThrow(
+			`'${credentials.backend === 'openrouter' ? 'OpenRouter Base URL' : 'Base URL'}' must use HTTPS`,
+		);
 		expect(f.http).not.toHaveBeenCalled();
 		const check = await credentialCheck(credentials);
 		expect(check.result).toMatchObject({
@@ -1896,7 +2112,9 @@ describe('security review round one', () => {
 		route.http.mockResolvedValue(response({ route: { ...answerSet.choice, confidence: 2 } }));
 		const outputs = await route.run();
 		expect(outputs[0]).toEqual([]);
-		expect(outputs[1][0].error).toBeInstanceOf(NodeApiError);
+		expect(outputs[1][0]).not.toHaveProperty('error');
+		expect(outputs[1][0].json.error).toBe('Unexpected response from Nace [Item 1]');
+		expect(outputs[1][0].json.description).toContain('Question route: confidence');
 	});
 	it('sets the installed response-size option for decisions and model lists', async () => {
 		const f = fake();
@@ -1977,7 +2195,12 @@ describe('security review round one', () => {
 			const f = fake(
 				{ model: 'drex-max', imageProperties: 'red,blue' },
 				{},
-				[{ ...imageItem, binary: { ...imageItem.binary, red: { ...imageItem.binary.red, fileSize } } }],
+				[
+					{
+						...imageItem,
+						binary: { ...imageItem.binary, red: { ...imageItem.binary.red, fileSize } },
+					},
+				],
 				{ red: oversized, blue },
 			);
 			await expect(f.run()).rejects.toThrow('Image red exceeds the 16 MiB limit');
@@ -2032,7 +2255,7 @@ describe('security review round one', () => {
 	it.each(['stateJson', 'questionsJson'])('reports invalid %s JSON before HTTP', async (name) => {
 		const f = fake({ [name]: '{broken', ...(name === 'stateJson' ? { stateFormat: 'json' } : {}) });
 		await expect(f.run()).rejects.toThrow(
-			`${name === 'stateJson' ? 'State (JSON)' : 'Questions (JSON)'} must be valid JSON`,
+			`'${name === 'stateJson' ? 'State (JSON)' : 'Questions (JSON)'}' must be valid JSON`,
 		);
 		expect(f.http).not.toHaveBeenCalled();
 	});
@@ -2060,7 +2283,7 @@ describe('security review round one', () => {
 		expect(build).toContain('npm run build');
 		expect(build).toContain('npm pack');
 		expect(build).toContain('actions/upload-artifact@');
-		expect(publish).toContain("'v*.*.*'");
+		expect(publish).toContain("- '*.*.*'");
 		expect(publish).toContain('workflow_dispatch:');
 		expect(release).toContain('needs: build');
 		expect(release).toContain('id-token: write');
@@ -2073,6 +2296,132 @@ describe('security review round one', () => {
 });
 
 describe('declarative credential tests and verified-node wording', () => {
+	it.each([
+		{
+			credentials: { backend: 'nace' },
+			request: { uri: 'https://console.nace.ai/v1/models' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: { uri: 'https://openrouter.ai/api/v1/key' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: { uri: 'https://OPENROUTER.AI:443/api/v1/key' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: { uri: '/v1/key', baseURL: 'https://openrouter.ai/api' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: {
+				uri: 'https://openrouter.ai:443/api/v1/key',
+				url: '/v1/models',
+				baseURL: 'https://openrouter.ai/api',
+			},
+		},
+		{
+			credentials: { backend: 'nace', baseUrl: 'https://drex.example/custom/api' },
+			request: { uri: 'https://drex.example/custom/api/v1/models' },
+		},
+		{
+			credentials: { backend: 'nace', baseUrl: 'https://drex.example/custom/api' },
+			request: { uri: 'v1/models', baseURL: 'https://drex.example/custom/api/' },
+		},
+	])('authenticates the HTTP Request uri shape: %j', async ({ credentials, request }) => {
+		const options = { ...request, headers: { 'X-Test': 'preserved' } };
+		const authenticated = await new NaceApi().authenticate(
+			{ ...credentials, apiKey: 'synthetic' },
+			options,
+		);
+		expect(authenticated.uri).toBe(request.uri);
+		expect(authenticated.url).toBe(request.url);
+		expect(authenticated.headers).toEqual({
+			'X-Test': 'preserved',
+			Authorization: 'Bearer synthetic',
+		});
+		expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+	});
+	it.each([
+		{ uri: 'https://openrouter.ai@evil.example/' },
+		{ url: 'https://openrouter.ai@evil.example/' },
+		{ uri: 'https://openrouter.ai:8443/api/v1/key' },
+		{ uri: 'https://evil.example/', url: 'https://openrouter.ai/api/v1/key' },
+		{ uri: 'https://openrouter.ai/api/v1/key', url: 'https://evil.example/' },
+		{ uri: '/capture', url: 'https://openrouter.ai/api/v1/key', baseURL: 'https://evil.example' },
+		{ uri: 'https://openrouter.ai/api/v1/key', url: '/capture', baseURL: 'https://evil.example' },
+		{ uri: '//evil.example/capture', baseURL: 'https://openrouter.ai/api' },
+		{ uri: '/v1/key' },
+		{ uri: 'https://[synthetic', url: 'https://openrouter.ai/api/v1/key' },
+		{},
+	])(
+		'refuses unsafe or conflicting uri/url targets without leaking the key: %j',
+		async (request) => {
+			const options = { ...request, headers: { 'X-Test': 'preserved' } };
+			const authentication = new NaceApi().authenticate(
+				{ backend: 'openrouter', apiKey: 'synthetic' },
+				options,
+			);
+			await expect(authentication).rejects.toThrow(/Nace API credentials/);
+			await expect(authentication).rejects.not.toThrow('synthetic');
+			expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+		},
+	);
+	it.each([
+		{ url: 'https://OPENROUTER.AI:443/api/v1/key' },
+		{ url: 'https://openrouter.ai/another/path', baseURL: 'https://example.org' },
+		{ url: '/v1/key', baseURL: 'https://openrouter.ai/api' },
+		{ url: 'v1/key', baseURL: 'https://openrouter.ai/api/' },
+		{ url: '//openrouter.ai/api/v1/key', baseURL: 'https://openrouter.ai/api' },
+	])('authenticates a same-origin effective request URL: %j', async (request) => {
+		const options: IHttpRequestOptions = {
+			...request,
+			method: 'GET',
+			headers: { 'X-Test': 'preserved' },
+		};
+		const authenticated = await new NaceApi().authenticate(
+			{ backend: 'openrouter', apiKey: 'synthetic' },
+			options,
+		);
+		expect(authenticated.url).toBe(request.url);
+		expect(authenticated.headers).toEqual({
+			'X-Test': 'preserved',
+			Authorization: 'Bearer synthetic',
+		});
+		expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+	});
+	it.each([
+		{ url: 'http://example.org/capture' },
+		{ url: 'https://example.org/synthetic', baseURL: 'https://openrouter.ai/api' },
+		{ url: '/capture', baseURL: 'https://example.org' },
+		{ url: 'capture', baseURL: 'https://example.org/path/' },
+		{ url: '//example.org/capture', baseURL: 'https://openrouter.ai/api' },
+		{ url: '/\\example.org/capture', baseURL: 'https://openrouter.ai/api' },
+		{ url: 'https://openrouter.ai.example.org/capture' },
+		{ url: 'https://sub.openrouter.ai/capture' },
+		{ url: 'https://openrouter.ai:8443/capture' },
+		{ url: 'http://openrouter.ai/capture' },
+		{ url: '/capture' },
+		{ url: 'https://[synthetic' },
+	])(
+		'refuses unsafe or unresolved effective request URLs without exposing the key: %j',
+		async (request) => {
+			const options: IHttpRequestOptions = {
+				...request,
+				method: 'GET',
+				headers: { 'X-Test': 'preserved' },
+			};
+			const authentication = new NaceApi().authenticate(
+				{ backend: 'openrouter', apiKey: 'synthetic' },
+				options,
+			);
+			await expect(authentication).rejects.toThrow(/Nace API credentials/);
+			await expect(authentication).rejects.not.toThrow('synthetic');
+			expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+			expect(options.url).toBe(request.url);
+		},
+	);
 	it.each(['nace', 'openrouter'])(
 		'declares the standard %s endpoint and attribution headers',
 		async (backend) => {
@@ -2085,6 +2434,7 @@ describe('declarative credential tests and verified-node wording', () => {
 			};
 			const test = credential.test.request;
 			expect(test.method).toBe('GET');
+			expect(test.maxResponseBodyBytes).toBe(16 * 1024 * 1024);
 			expect(evaluateMetadata(test.url as string, {}, data)).toBe(
 				backend === 'openrouter' ? '/v1/key' : '/v1/models',
 			);
@@ -2137,7 +2487,7 @@ describe('declarative credential tests and verified-node wording', () => {
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
 		expect(result[0][1].json.error).toBe(
-			'Model Name or ID: OpenRouter models must start with nace-ai/. Try nace-ai/drex-v2.0. [Item 2]',
+			"'Model Name or ID': OpenRouter models must start with nace-ai/. Try nace-ai/drex-v2.0. [Item 2]",
 		);
 		expect(result[0][1].pairedItem).toEqual({ item: 1 });
 		expect(f.http).toHaveBeenCalledTimes(1);
@@ -2150,7 +2500,7 @@ describe('declarative credential tests and verified-node wording', () => {
 			body: { error: { type: 'authentication_error', message: 'Invalid token' } },
 		});
 		await expect(f.run()).rejects.toSatisfy((issue: NodeApiError) => {
-			expect(issue.message).toBe('API Key: Check your Nace API credential. [Item 1]');
+			expect(issue.message).toBe("'API Key': Check your Nace API credential. [Item 1]");
 			expect(issue.description).toContain('Type: authentication_error');
 			expect(issue.description).not.toContain('Error type:');
 			expect(issue.message + issue.description).not.toMatch(
@@ -2164,7 +2514,7 @@ describe('declarative credential tests and verified-node wording', () => {
 		f.http.mockResolvedValue(response({ approved: null }));
 		await expect(f.run()).rejects.toSatisfy((issue: NodeApiError) => {
 			expect(issue.description).toBe(
-				'Questions: Question approved: expected an answer object [Item 1]',
+				"'Questions': Question approved: expected an answer object. Retry the request. If it happens again, contact Nace support and include the request ID when available.\nRequest ID: req-test [Item 1]",
 			);
 			expect(issue.message.match(/\[Item 1\]/g)).toHaveLength(1);
 			return true;

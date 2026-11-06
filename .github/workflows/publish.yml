@@ -7,14 +7,15 @@
 #    n8n-nodes-nace, workflow publish.yml, environment npm-publish.
 # 3. No NPM_TOKEN is required. The publish job uses GitHub OIDC and provenance.
 #
-# Push a version tag such as v0.1.0, or run this workflow manually. A manual run
-# publishes the selected ref after checks and environment approval.
+# Run `npm run release` (it pushes a version tag such as 1.2.3), or run this
+# workflow manually. A manual run publishes the selected ref after checks and
+# environment approval.
 name: Publish
 
 on:
   push:
     tags:
-      - 'v*.*.*'
+      - '*.*.*'
   workflow_dispatch:
 
 permissions:
