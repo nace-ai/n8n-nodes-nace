@@ -58,6 +58,33 @@ function response(
 		},
 	};
 }
+// Model n8n-core 2.46.5 WorkflowExecute.normalizeNodeErrors before downstream assertions.
+function normalizeNodeErrors(outputs: INodeExecutionData[][]): INodeExecutionData[][] {
+	return outputs.map((items) =>
+		items.map((item) => {
+			const error =
+				item.json.$error !== undefined && item.json.$json !== undefined
+					? (item.json.$error as NodeApiError | NodeOperationError)
+					: item.error;
+			return error === undefined ? item : { ...item, error, json: { error: error.message } };
+		}),
+	);
+}
+// Model handleNodeErrorOutput's classification before normalizeNodeErrors.
+function splitErrorOutput(outputs: INodeExecutionData[][]): INodeExecutionData[][] {
+	const errors: INodeExecutionData[] = [];
+	const regular = outputs.map((items) =>
+		items.filter((item) => {
+			const isError =
+				item.error ||
+				(item.json.error &&
+					Object.keys(item.json).every((key) => ['error', 'message', 'details'].includes(key)));
+			if (isError) errors.push(item);
+			return !isError;
+		}),
+	);
+	return [...regular, errors];
+}
 function fake(
 	params: Record<string, unknown> = {},
 	credentials: object = {},
@@ -137,7 +164,8 @@ function fake(
 		context: context as unknown as IExecuteFunctions,
 		http,
 		raw: context,
-		run: () => new Nace().execute.call(context as unknown as IExecuteFunctions),
+		run: async () =>
+			normalizeNodeErrors(await new Nace().execute.call(context as unknown as IExecuteFunctions)),
 	};
 }
 async function credentialCheck(
@@ -463,6 +491,149 @@ describe('images and limits', () => {
 });
 
 describe('errors, retries, and routing', () => {
+	it.each(
+		['nace', 'openrouter'].flatMap((backend) =>
+			['evaluate', 'route', 'tool'].flatMap((mode) =>
+				[false, true].map((includeOtherFields) => ({ backend, mode, includeOtherFields })),
+			),
+		),
+	)(
+		'preserves downstream $backend $mode error details after normalization (includeOtherFields=$includeOtherFields)',
+		async ({ backend, mode, includeOtherFields }) => {
+			const input = {
+				...imageItem,
+				json: {
+					ticket: 'Help with billing',
+					customerId: 'customer-42',
+					error: 'old input error',
+					description: 'old input description',
+				},
+			};
+			const f = fake(
+				{
+					operation: mode === 'evaluate' ? 'evaluate' : 'route',
+					labels: { label: [{ label: 'billing' }, { label: 'support' }] },
+					options: { includeOtherFields },
+				},
+				{ backend },
+				[input],
+			);
+			const getNode = f.raw.getNode;
+			f.raw.getNode = () => ({ ...getNode(), onError: 'continueRegularOutput' as const });
+			if (mode === 'tool') {
+				const getNode = f.raw.getNode;
+				f.raw.getNode = () => ({ ...getNode(), type: 'n8n-nodes-nace.naceTool' });
+			}
+			f.raw.continueOnFail = () => true;
+			f.http.mockResolvedValue({
+				statusCode: 422,
+				headers: {},
+				body: {
+					error: {
+						message: 'Invalid request',
+						issues: [
+							{ path: ['questions', 'q', 'instructions'], message: 'Must be a string' },
+							{ path: 'model', message: 'Unknown model' },
+						],
+					},
+					request_id: 'req-continued-422',
+				},
+			});
+			const outputs = await f.run();
+			const target = mode === 'route' ? 2 : 0;
+			expect(outputs.flat()).toHaveLength(1);
+			const item = outputs[target][0];
+			expect(item).not.toHaveProperty('error');
+			expect(item.json).toEqual({
+				...(includeOtherFields ? { ticket: 'Help with billing', customerId: 'customer-42' } : {}),
+				error: 'Invalid request [Item 1]',
+				description:
+					'questions.q.instructions: Must be a string\nmodel: Unknown model\nRequest ID: req-continued-422 [Item 1]',
+			});
+			expect(item.binary).toEqual(includeOtherFields ? input.binary : undefined);
+			expect(item.pairedItem).toEqual({ item: 0 });
+			expect(input.json.error).toBe('old input error');
+			expect(input.json.description).toBe('old input description');
+		},
+	);
+	it.each(
+		['nace', 'openrouter'].flatMap((backend) =>
+			['evaluate', 'route', 'tool'].flatMap((mode) =>
+				[false, true].map((includeOtherFields) => ({ backend, mode, includeOtherFields })),
+			),
+		),
+	)(
+		'routes $backend $mode failures to the Error output before normalization (includeOtherFields=$includeOtherFields)',
+		async ({ backend, mode, includeOtherFields }) => {
+			const f = fake(
+				{
+					operation: mode === 'evaluate' ? 'evaluate' : 'route',
+					labels: { label: [{ label: 'billing' }, { label: 'support' }] },
+					options: { includeOtherFields },
+				},
+				{ backend },
+				[{ ...imageItem, json: { ticket: 'Help', customerId: 'customer-42' } }, { json: {} }],
+			);
+			const getNode = f.raw.getNode;
+			f.raw.getNode = () => ({
+				...getNode(),
+				...(mode === 'tool' ? { type: 'n8n-nodes-nace.naceTool' } : {}),
+				onError: 'continueErrorOutput' as const,
+			});
+			f.raw.continueOnFail = () => true;
+			f.http.mockResolvedValueOnce(response({}, 422));
+			const raw = await new Nace().execute.call(f.context);
+			const target = mode === 'route' ? 2 : 0;
+			const failed = raw[target][0];
+			expect(failed.error).toBeInstanceOf(NodeApiError);
+			expect(failed.json.error).toBe('Drex API returned status 422 [Item 1]');
+			expect(failed.json.description).toContain('Request ID: req-test');
+			if (includeOtherFields)
+				expect(failed.json).toMatchObject({ ticket: 'Help', customerId: 'customer-42' });
+			const downstream = normalizeNodeErrors(splitErrorOutput(raw));
+			const errors = downstream.at(-1)!;
+			expect(errors).toHaveLength(1);
+			expect(errors[0].json).toEqual({ error: 'Drex API returned status 422 [Item 1]' });
+			expect(errors[0].pairedItem).toEqual({ item: 0 });
+			expect(errors[0].binary).toEqual(includeOtherFields ? imageItem.binary : undefined);
+			const successful = downstream.slice(0, -1).flat();
+			expect(successful).toHaveLength(1);
+			expect(successful[0]).not.toHaveProperty('error');
+			expect(successful[0].pairedItem).toEqual({ item: 1 });
+			if (mode === 'route') expect(downstream[2]).toEqual([]);
+		},
+	);
+	it('omits an unavailable description from a continued transport error', async () => {
+		const f = fake();
+		f.raw.continueOnFail = () => true;
+		f.http.mockRejectedValue(new Error('Connection failed'));
+		const result = await f.run();
+		expect(result[0][0].json).toEqual({ error: 'Connection failed [Item 1]' });
+		expect(result[0][0]).not.toHaveProperty('error');
+		expect(result[0][0].pairedItem).toEqual({ item: 0 });
+	});
+	it('drops an input description when a regular continued transport error has none', async () => {
+		const input = {
+			...imageItem,
+			json: { ticket: 'Help', customerId: 'customer-42', description: 'Unrelated input text' },
+		};
+		const f = fake({ options: { includeOtherFields: true } }, {}, [input]);
+		const getNode = f.raw.getNode;
+		f.raw.getNode = () => ({ ...getNode(), onError: 'continueRegularOutput' as const });
+		f.raw.continueOnFail = () => true;
+		f.http.mockRejectedValue(new Error('Connection failed'));
+		const result = await f.run();
+		expect(result[0][0].json).toEqual({
+			ticket: 'Help',
+			customerId: 'customer-42',
+			error: 'Connection failed [Item 1]',
+		});
+		expect(result[0][0].json).not.toHaveProperty('description');
+		expect(result[0][0]).not.toHaveProperty('error');
+		expect(result[0][0].pairedItem).toEqual({ item: 0 });
+		expect(result[0][0].binary).toEqual(input.binary);
+		expect(input.json.description).toBe('Unrelated input text');
+	});
 	it('includes every 422 issue path and message and the request ID', async () => {
 		const f = fake();
 		f.http.mockResolvedValue({
@@ -568,7 +739,8 @@ describe('errors, retries, and routing', () => {
 			.mockResolvedValueOnce(response({ route: answerSet.choice }));
 		const result = await f.run();
 		expect(result[1][0]).toMatchObject({ pairedItem: { item: 0 } });
-		expect(result[1][0].error).toBeInstanceOf(NodeApiError);
+		expect(result[1][0].json.error).toBe('Drex API returned status 422 [Item 1]');
+		expect(result[1][0]).not.toHaveProperty('error');
 		expect(result[0][0].pairedItem).toEqual({ item: 1 });
 	});
 	it('exposes dynamic output names matching configured label order', () => {
@@ -921,20 +1093,23 @@ describe('review regressions', () => {
 		expect(body(f.http, 0).questions.route.criteria).toEqual({ support: 'Description 0' });
 		expect(body(f.http, 1).questions.route.criteria).toEqual({ support: 'Description 1' });
 	});
-	it('always places continued Route errors on Unsure and preserves the marker for n8n Error output handling', async () => {
+	it('marks continued Route errors for n8n Error output handling and normalization', async () => {
 		const f = fake({
 			operation: 'route',
 			labels: { label: [{ label: 'billing' }, { label: 'support' }] },
 		});
+		const getNode = f.raw.getNode;
+		f.raw.getNode = () => ({ ...getNode(), onError: 'continueErrorOutput' as const });
 		f.raw.continueOnFail = () => true;
 		f.http.mockResolvedValue(response({}, 422));
 		const result = await f.run();
 		const error = result[2][0];
 		expect(error.error).toBeInstanceOf(NodeApiError);
-		expect(error.json.error).toBeTruthy();
+		expect(error.json).toEqual({ error: 'Drex API returned status 422 [Item 1]' });
+		expect(error.error?.description).toContain('Request ID: req-test');
 		expect(error.pairedItem).toEqual({ item: 0 });
 		expect(result.flat()).toHaveLength(1);
-		// n8n-core 2.46.5 handleNodeErrorOutput scans every main output for this marker.
+		// n8n-core 2.46.5 handleNodeErrorOutput recognizes item.error on every main output.
 		const configuredNode = { ...f.raw.getNode(), onError: 'continueErrorOutput' as const };
 		const description = new Nace().description;
 		const workflow = {
@@ -1002,7 +1177,9 @@ describe('review regressions', () => {
 		f.http.mockResolvedValue(response({}, 422));
 		const result = await f.run();
 		expect(result).toHaveLength(1);
-		expect(result[0][0].error).toBeInstanceOf(NodeApiError);
+		expect(result[0][0]).not.toHaveProperty('error');
+		expect(result[0][0].json.error).toBe('Drex API returned status 422 [Item 1]');
+		expect(result[0][0].json.description).toContain('Request ID: req-test');
 	});
 	it.each([false, true])(
 		'redacts echoed credential values from API errors and continued results (continue=%s)',
@@ -1321,8 +1498,12 @@ describe('backend and permanent Unsure regressions', () => {
 		expect(result[1]).toEqual([]);
 		expect(result[2][0]).toMatchObject({
 			pairedItem: { item: 0 },
-			error: expect.any(NodeApiError),
+			json: {
+				error: 'Drex API returned status 422 [Item 1]',
+				description: expect.stringContaining('Request ID: req-test'),
+			},
 		});
+		expect(result[2][0]).not.toHaveProperty('error');
 	});
 	it('uses threshold 0 to keep low-confidence decisions on their label output', async () => {
 		const f = fake({
@@ -1927,7 +2108,9 @@ describe('security review round one', () => {
 		route.http.mockResolvedValue(response({ route: { ...answerSet.choice, confidence: 2 } }));
 		const outputs = await route.run();
 		expect(outputs[0]).toEqual([]);
-		expect(outputs[1][0].error).toBeInstanceOf(NodeApiError);
+		expect(outputs[1][0]).not.toHaveProperty('error');
+		expect(outputs[1][0].json.error).toBe('Unexpected response from Nace [Item 1]');
+		expect(outputs[1][0].json.description).toContain('Question route: confidence');
 	});
 	it('sets the installed response-size option for decisions and model lists', async () => {
 		const f = fake();

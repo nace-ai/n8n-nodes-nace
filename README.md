@@ -185,16 +185,14 @@ Timeouts and transport errors are surfaced without retrying.
 
 ### Continuing after errors
 
-Enable **On Error > Continue** to keep processing later input items. This includes failures while resolving parameter expressions. Items that cannot be processed contain a message and description and retain item pairing. Messages name the relevant parameter and include `[Item N]` when the item is known. **Include Other Input Fields** also retains input JSON and binary attachments on continued errors.
+Enable **On Error > Continue** to keep processing later input items. This includes failures while resolving parameter expressions. Items that cannot be processed contain the message in `json.error` and, when available, details in `json.description` (including issue paths and request IDs). Messages name the relevant parameter and include `[Item N]` when the item is known. **Include Other Input Fields** also retains input JSON and binary attachments on continued errors. Error fields take precedence on collisions, and items retain n8n pairing.
 
 | Route error setting | Destination |
 | --- | --- |
-| **Continue** | Final **Unsure** output, even at threshold `0`. Label outputs receive successful decisions only. |
-| **Continue (using error output)** | n8n moves error items from Unsure to its separate **Error** output. |
+| **Continue** | Final **Unsure** output, even at threshold `0`, with full error JSON. |
+| **Continue (using error output)** | n8n moves failed items from Unsure to its separate **Error** output. |
 
-The node sets `item.error`. n8n-core checks this independently of JSON fields. In n8n-core 2.46.5, a bare `json.error` is recognized only when all JSON keys are among `error`, `message`, and `details`. Relying on `json.error` alone would fail with input fields or a description.
-
-This behavior was checked against the locally cached n8n-core 2.46.5 `WorkflowExecute.handleNodeErrorOutput` implementation and the installed n8n-workflow output helper. Tool invocations collect continued errors on their single output.
+Label outputs receive successful decisions only. With **Continue**, downstream nodes can check `$json.error`; descriptions and optional input fields remain available. With **Continue (using error output)**, the node sets `item.error` for n8n routing, and n8n normalizes the item's JSON to `{ "error": "message" }`. Pairing and optional binary attachments remain. Tool invocations collect results on their single output before n8n applies the selected error handling.
 
 ## Errors
 

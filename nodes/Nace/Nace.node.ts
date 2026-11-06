@@ -187,14 +187,16 @@ export class Nace implements INodeType {
 			} catch (error) {
 				const failure = operationFailure(this.getNode(), secret, error, index);
 				if (!this.continueOnFail()) throw failure;
+				const inputFields = options.includeOtherFields ? { ...cleanInput(item.json, secret) } : {};
+				delete inputFields.description;
 				outputs[!isTool && isRoute ? configuredLabels.length : 0].push({
 					json: {
-						...(options.includeOtherFields ? cleanInput(item.json, secret) : {}),
+						...inputFields,
 						error: failure.message,
-						description: 'description' in failure ? failure.description : undefined,
+						...(failure.description ? { description: failure.description } : {}),
 					},
 					...(options.includeOtherFields && item.binary ? { binary: item.binary } : {}),
-					error: failure,
+					...(this.getNode().onError === 'continueErrorOutput' ? { error: failure } : {}),
 					pairedItem: { item: index },
 				});
 			}
