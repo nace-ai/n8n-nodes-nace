@@ -8,6 +8,9 @@ import type {
 import { CLIENT } from '../nodes/Nace/constants';
 import { resolveBaseUrl } from '../nodes/Nace/baseUrl';
 
+// HTTP Request uses uri; the modern HTTP helper uses url.
+type RequestOptions = Omit<IHttpRequestOptions, 'url'> & { url?: string; uri?: string };
+
 export class NaceApi implements ICredentialType {
 	name = 'naceApi';
 	displayName = 'Nace API';
@@ -50,11 +53,27 @@ export class NaceApi implements ICredentialType {
 			displayOptions: { show: { backend: ['openrouter'] } },
 		},
 	];
-	async authenticate(
+	async authenticate<T extends RequestOptions>(
 		credentials: ICredentialDataDecryptedObject,
-		requestOptions: IHttpRequestOptions,
-	): Promise<IHttpRequestOptions> {
+		requestOptions: T,
+	): Promise<T> {
 		const baseUrl = resolveBaseUrl(credentials);
+		const targets = [requestOptions.uri, requestOptions.url].filter(
+			(target) => target !== undefined,
+		);
+		let requestUrls: URL[];
+		try {
+			if (!targets.length) throw new Error('Missing request target');
+			requestUrls = targets.map((target) => new URL(target, requestOptions.baseURL));
+		} catch {
+			throw new Error('Nace API credentials require a valid absolute request URL or baseURL.');
+		}
+		const origin = new URL(baseUrl).origin;
+		if (requestUrls.some((url) => url.origin !== origin)) {
+			throw new Error(
+				'Nace API credentials can only be used for requests to the configured base URL origin.',
+			);
+		}
 		return {
 			...requestOptions,
 			...(requestOptions.baseURL === undefined ? {} : { baseURL: baseUrl }),
@@ -67,6 +86,7 @@ export class NaceApi implements ICredentialType {
 				"={{ ($credentials.backend === 'openrouter' ? ($credentials.openRouterBaseUrl || 'https://openrouter.ai/api') : ($credentials.baseUrl || 'https://console.nace.ai')).trim().replace(/\\/+$/, '') }}",
 			url: '={{ $credentials.backend === "openrouter" ? "/v1/key" : "/v1/models" }}',
 			method: 'GET',
+			maxResponseBodyBytes: 16 * 1024 * 1024,
 			disableFollowRedirect: true,
 			headers: {
 				'User-Agent': CLIENT,

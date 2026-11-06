@@ -8,6 +8,7 @@ import type {
 	IDataObject,
 	INodeExecutionData,
 	INodeProperties,
+	IHttpRequestOptions,
 } from 'n8n-workflow';
 import { NodeApiError, NodeOperationError, NodeHelpers, Expression } from 'n8n-workflow';
 import { Nace } from '../nodes/Nace/Nace.node';
@@ -1977,7 +1978,12 @@ describe('security review round one', () => {
 			const f = fake(
 				{ model: 'drex-max', imageProperties: 'red,blue' },
 				{},
-				[{ ...imageItem, binary: { ...imageItem.binary, red: { ...imageItem.binary.red, fileSize } } }],
+				[
+					{
+						...imageItem,
+						binary: { ...imageItem.binary, red: { ...imageItem.binary.red, fileSize } },
+					},
+				],
 				{ red: oversized, blue },
 			);
 			await expect(f.run()).rejects.toThrow('Image red exceeds the 16 MiB limit');
@@ -2073,6 +2079,132 @@ describe('security review round one', () => {
 });
 
 describe('declarative credential tests and verified-node wording', () => {
+	it.each([
+		{
+			credentials: { backend: 'nace' },
+			request: { uri: 'https://console.nace.ai/v1/models' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: { uri: 'https://openrouter.ai/api/v1/key' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: { uri: 'https://OPENROUTER.AI:443/api/v1/key' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: { uri: '/v1/key', baseURL: 'https://openrouter.ai/api' },
+		},
+		{
+			credentials: { backend: 'openrouter' },
+			request: {
+				uri: 'https://openrouter.ai:443/api/v1/key',
+				url: '/v1/models',
+				baseURL: 'https://openrouter.ai/api',
+			},
+		},
+		{
+			credentials: { backend: 'nace', baseUrl: 'https://drex.example/custom/api' },
+			request: { uri: 'https://drex.example/custom/api/v1/models' },
+		},
+		{
+			credentials: { backend: 'nace', baseUrl: 'https://drex.example/custom/api' },
+			request: { uri: 'v1/models', baseURL: 'https://drex.example/custom/api/' },
+		},
+	])('authenticates the HTTP Request uri shape: %j', async ({ credentials, request }) => {
+		const options = { ...request, headers: { 'X-Test': 'preserved' } };
+		const authenticated = await new NaceApi().authenticate(
+			{ ...credentials, apiKey: 'synthetic' },
+			options,
+		);
+		expect(authenticated.uri).toBe(request.uri);
+		expect(authenticated.url).toBe(request.url);
+		expect(authenticated.headers).toEqual({
+			'X-Test': 'preserved',
+			Authorization: 'Bearer synthetic',
+		});
+		expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+	});
+	it.each([
+		{ uri: 'https://openrouter.ai@evil.example/' },
+		{ url: 'https://openrouter.ai@evil.example/' },
+		{ uri: 'https://openrouter.ai:8443/api/v1/key' },
+		{ uri: 'https://evil.example/', url: 'https://openrouter.ai/api/v1/key' },
+		{ uri: 'https://openrouter.ai/api/v1/key', url: 'https://evil.example/' },
+		{ uri: '/capture', url: 'https://openrouter.ai/api/v1/key', baseURL: 'https://evil.example' },
+		{ uri: 'https://openrouter.ai/api/v1/key', url: '/capture', baseURL: 'https://evil.example' },
+		{ uri: '//evil.example/capture', baseURL: 'https://openrouter.ai/api' },
+		{ uri: '/v1/key' },
+		{ uri: 'https://[synthetic', url: 'https://openrouter.ai/api/v1/key' },
+		{},
+	])(
+		'refuses unsafe or conflicting uri/url targets without leaking the key: %j',
+		async (request) => {
+			const options = { ...request, headers: { 'X-Test': 'preserved' } };
+			const authentication = new NaceApi().authenticate(
+				{ backend: 'openrouter', apiKey: 'synthetic' },
+				options,
+			);
+			await expect(authentication).rejects.toThrow(/Nace API credentials/);
+			await expect(authentication).rejects.not.toThrow('synthetic');
+			expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+		},
+	);
+	it.each([
+		{ url: 'https://OPENROUTER.AI:443/api/v1/key' },
+		{ url: 'https://openrouter.ai/another/path', baseURL: 'https://example.org' },
+		{ url: '/v1/key', baseURL: 'https://openrouter.ai/api' },
+		{ url: 'v1/key', baseURL: 'https://openrouter.ai/api/' },
+		{ url: '//openrouter.ai/api/v1/key', baseURL: 'https://openrouter.ai/api' },
+	])('authenticates a same-origin effective request URL: %j', async (request) => {
+		const options: IHttpRequestOptions = {
+			...request,
+			method: 'GET',
+			headers: { 'X-Test': 'preserved' },
+		};
+		const authenticated = await new NaceApi().authenticate(
+			{ backend: 'openrouter', apiKey: 'synthetic' },
+			options,
+		);
+		expect(authenticated.url).toBe(request.url);
+		expect(authenticated.headers).toEqual({
+			'X-Test': 'preserved',
+			Authorization: 'Bearer synthetic',
+		});
+		expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+	});
+	it.each([
+		{ url: 'http://example.org/capture' },
+		{ url: 'https://example.org/synthetic', baseURL: 'https://openrouter.ai/api' },
+		{ url: '/capture', baseURL: 'https://example.org' },
+		{ url: 'capture', baseURL: 'https://example.org/path/' },
+		{ url: '//example.org/capture', baseURL: 'https://openrouter.ai/api' },
+		{ url: '/\\example.org/capture', baseURL: 'https://openrouter.ai/api' },
+		{ url: 'https://openrouter.ai.example.org/capture' },
+		{ url: 'https://sub.openrouter.ai/capture' },
+		{ url: 'https://openrouter.ai:8443/capture' },
+		{ url: 'http://openrouter.ai/capture' },
+		{ url: '/capture' },
+		{ url: 'https://[synthetic' },
+	])(
+		'refuses unsafe or unresolved effective request URLs without exposing the key: %j',
+		async (request) => {
+			const options: IHttpRequestOptions = {
+				...request,
+				method: 'GET',
+				headers: { 'X-Test': 'preserved' },
+			};
+			const authentication = new NaceApi().authenticate(
+				{ backend: 'openrouter', apiKey: 'synthetic' },
+				options,
+			);
+			await expect(authentication).rejects.toThrow(/Nace API credentials/);
+			await expect(authentication).rejects.not.toThrow('synthetic');
+			expect(options.headers).toEqual({ 'X-Test': 'preserved' });
+			expect(options.url).toBe(request.url);
+		},
+	);
 	it.each(['nace', 'openrouter'])(
 		'declares the standard %s endpoint and attribution headers',
 		async (backend) => {
@@ -2085,6 +2217,7 @@ describe('declarative credential tests and verified-node wording', () => {
 			};
 			const test = credential.test.request;
 			expect(test.method).toBe('GET');
+			expect(test.maxResponseBodyBytes).toBe(16 * 1024 * 1024);
 			expect(evaluateMetadata(test.url as string, {}, data)).toBe(
 				backend === 'openrouter' ? '/v1/key' : '/v1/models',
 			);
