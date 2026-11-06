@@ -69,6 +69,6 @@ jobs:
           path: package
       - name: Publish tarball with provenance
         run: |
-          set -- package/nace-ai-n8n-nodes-nace-*.tgz
+          set -- ./package/nace-ai-n8n-nodes-nace-*.tgz
           [ "$#" -eq 1 ] && [ -f "$1" ]
           npm publish "$1" --provenance --access public --ignore-scripts

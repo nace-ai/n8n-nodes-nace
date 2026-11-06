@@ -2291,6 +2291,7 @@ describe('security review round one', () => {
 		expect(release).not.toContain('npm ci');
 		expect(release).not.toContain('actions/checkout');
 		expect(release).toContain('actions/download-artifact@');
+		expect(release).toContain('set -- ./package/nace-ai-n8n-nodes-nace-*.tgz');
 		expect(release).toContain('npm publish "$1" --provenance --access public');
 	});
 });
