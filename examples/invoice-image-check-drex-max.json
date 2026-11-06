@@ -28,7 +28,7 @@
     {
       "id": "check-invoice",
       "name": "Check invoice",
-      "type": "n8n-nodes-nace.nace",
+      "type": "@nace-ai/n8n-nodes-nace.nace",
       "typeVersion": 1,
       "position": [
         480,

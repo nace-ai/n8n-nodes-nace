@@ -40,7 +40,7 @@
 On self-hosted n8n:
 
 1. Open **Settings > Community Nodes > Install**.
-2. Enter `n8n-nodes-nace` and acknowledge the community node notice.
+2. Enter `@nace-ai/n8n-nodes-nace` and acknowledge the community node notice.
 3. Install the package and add **Drex by Nace** to a workflow.
 
 See [n8n community node installation](https://docs.n8n.io/integrations/community-nodes/installation/).
