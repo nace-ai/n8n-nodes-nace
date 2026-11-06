@@ -217,7 +217,7 @@ Requests include `HTTP-Referer: https://nace.ai` and `X-OpenRouter-Title: Drex f
 
 The model dropdown requests `GET /api/v1/models?output_modalities=all`. This includes Drex decision models. It filters to `nace-ai/` IDs and displays each model's name and description when supplied. The Nace model request remains `GET /v1/models`.
 
-OpenRouter responses include `usage.cost` and may include `provider`. The node keeps usage and provider as returned. With full output, **Simplify** off, a score's `legend` is passed through unchanged. OpenRouter may return an object keyed by index instead of an array.
+OpenRouter responses include `usage.cost` and may include `provider`. The node keeps usage and provider as returned. With full output, **Simplify** off, a score's `legend` is passed through unchanged. OpenRouter may return an object keyed by index instead of an array. Yes/no (noul) answers from OpenRouter may come without `confidence`, so Simplify returns only `value` for them.
 
 Only the OpenRouter backend uses its generation `id`, such as `gen-dec-...`, as `request_id` when neither a body request ID nor an `x-request-id` header is present.
 
