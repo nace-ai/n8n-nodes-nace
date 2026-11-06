@@ -35,11 +35,16 @@ export function cleanInput<T>(value: T, secret: string, ancestors = new WeakSet<
 	if (ancestors.has(value)) return null as T;
 	ancestors.add(value);
 	try {
-		return (Array.isArray(value)
-			? value.map((entry) => cleanInput(entry, secret, ancestors))
-			: Object.fromEntries(
-					Object.entries(value).map(([key, entry]) => [key, cleanInput(entry, secret, ancestors)]),
-				)) as T;
+		return (
+			Array.isArray(value)
+				? value.map((entry) => cleanInput(entry, secret, ancestors))
+				: Object.fromEntries(
+						Object.entries(value).map(([key, entry]) => [
+							key,
+							cleanInput(entry, secret, ancestors),
+						]),
+					)
+		) as T;
 	} finally {
 		ancestors.delete(value);
 	}
@@ -151,11 +156,16 @@ export function unexpected(
 	backend: string,
 	description: string,
 	itemIndex?: number,
+	requestId?: string | number,
 ): NodeApiError {
 	return apiFailure(
 		node,
 		secret,
 		{},
-		{ message: `Unexpected response from ${backend}`, description, itemIndex },
+		{
+			message: `Unexpected response from ${backend}`,
+			description: `${description.replace(/\.$/, '')}. Retry the request. If it happens again, contact Nace support and include the request ID when available.${requestId === undefined ? '' : `\nRequest ID: ${requestId}`}`,
+			itemIndex,
+		},
 	);
 }

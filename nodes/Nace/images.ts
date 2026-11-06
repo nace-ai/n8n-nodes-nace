@@ -3,7 +3,7 @@ import { fail } from './questions';
 
 const MIB = 1024 * 1024;
 const bodyError =
-	'State / Questions / Image Binary Properties: JSON request body must be smaller than 4 MiB, including base64 images. Resize images or shorten the state.';
+	"'State' / 'Questions' / 'Input Binary Fields': JSON request body must be smaller than 4 MiB, including base64 images. Resize images or shorten the state.";
 function metadataBytes(size: string | undefined): number | undefined {
 	if (!size) return undefined;
 	const match = /^\s*(\d+(?:\.\d+)?)\s*(b|bytes?|kb|mb|gb|kib|mib|gib)?\s*$/i.exec(size);
@@ -51,7 +51,7 @@ export async function attachImages(
 		fail(
 			context,
 			index,
-			`Image Binary Properties: ${openRouter ? 'OpenRouter' : 'Nace'}: At most ${limit} images are allowed per request`,
+			`'Input Binary Fields': ${openRouter ? 'OpenRouter' : 'Nace'}: At most ${limit} images are allowed per request`,
 		);
 	const entries = names.map((name) => {
 		const binary = context.helpers.assertBinaryData(index, name);
@@ -59,15 +59,15 @@ export async function attachImages(
 			fail(
 				context,
 				index,
-				`Image Binary Properties: Image ${name}: only PNG, JPEG, or WebP is supported`,
+				`'Input Binary Fields': Image ${name}: only PNG, JPEG, or WebP is supported`,
 			);
 		const size = metadataBytes(binary.fileSize);
 		if (size !== undefined && size > 16 * MIB)
-			fail(context, index, `Image Binary Properties: Image ${name} exceeds the 16 MiB limit`);
+			fail(context, index, `'Input Binary Fields': Image ${name} exceeds the 16 MiB limit`);
 		return { name, mime: binary.mimeType, size };
 	});
 	if (entries.reduce((sum, entry) => sum + (entry.size || 0), 0) > 32 * MIB)
-		fail(context, index, 'Image Binary Properties: Images exceed the 32 MiB total limit');
+		fail(context, index, "'Input Binary Fields': Images exceed the 32 MiB total limit");
 	const baseBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
 	const projectedBase64 = entries.reduce(
 		(sum, entry) => sum + (entry.size === undefined ? 0 : 4 * Math.ceil(entry.size / 3)),
@@ -81,17 +81,17 @@ export async function attachImages(
 	for (const entry of entries) {
 		const buffer = await context.helpers.getBinaryDataBuffer(index, entry.name);
 		if (buffer.length > 16 * MIB)
-			fail(context, index, `Image Binary Properties: Image ${entry.name} exceeds the 16 MiB limit`);
+			fail(context, index, `'Input Binary Fields': Image ${entry.name} exceeds the 16 MiB limit`);
 		total += buffer.length;
 		if (total > 32 * MIB)
-			fail(context, index, 'Image Binary Properties: Images exceed the 32 MiB total limit');
+			fail(context, index, "'Input Binary Fields': Images exceed the 32 MiB total limit");
 		encodedBytes += 4 * Math.ceil(buffer.length / 3);
 		if (baseBytes + encodedBytes >= 4 * MIB) fail(context, index, bodyError);
 		if (!matchesMagic(buffer, entry.mime))
 			fail(
 				context,
 				index,
-				`Image Binary Properties: Image ${entry.name}: content does not match its PNG, JPEG, or WebP MIME type`,
+				`'Input Binary Fields': Image ${entry.name}: content does not match its PNG, JPEG, or WebP MIME type`,
 			);
 		images.push(`data:${entry.mime};base64,${buffer.toString('base64')}`);
 		if (openRouter)

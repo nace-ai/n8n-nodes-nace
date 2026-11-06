@@ -139,11 +139,11 @@ The model dropdown skips entries explicitly marked retired and identifies aliase
 
 The default model field is `drex-v2.0`. Use a `nace-ai/` ID for OpenRouter. To enter an ID absent from the dropdown, switch the field to an expression, such as `={{ 'drex-max' }}`. The list remains open to new models.
 
-Images require a model whose ID contains `drex-max`. Enter binary property names in **Image Binary Properties**, such as `front,back`.
+Images require a model whose ID contains `drex-max`. Enter input binary field names in **Input Binary Fields**, such as `front,back`.
 
-The node reads n8n binary data, including externally stored binary data. It sends data URLs in the configured order. Refer to them as **Image 1**, **Image 2**, and so on. Reversing the property names reverses image numbering.
+The node reads n8n binary data, including externally stored binary data. It sends data URLs in the configured order. Refer to them as **Image 1**, **Image 2**, and so on. Reversing the field names reverses image numbering.
 
-For an invoice, use `drex-max` and binary property `invoice`. Ask `Does Image 1 show an invoice with a readable total?`.
+For an invoice, use `drex-max` and binary field `invoice`. Ask `Does Image 1 show an invoice with a readable total?`.
 
 Images on other models are refused before an API request. AI Agent tool calls cannot supply binary attachments. Use a normal workflow node for image evaluation.
 

@@ -1041,7 +1041,7 @@ describe('review regressions', () => {
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
 		expect(result[0][0]).toMatchObject({
-			json: { error: 'Labels: Route requires at least one label [Item 1]' },
+			json: { error: "'Labels': Route requires at least one label [Item 1]" },
 			pairedItem: { item: 0 },
 		});
 	});
@@ -1396,10 +1396,10 @@ describe('backend and permanent Unsure regressions', () => {
 			const f = fake({}, credentials);
 			const expectedMessage =
 				credentials.backend === 'nace'
-					? 'Nace Base URL must not use an openrouter.ai host'
+					? "'Base URL' must not use an openrouter.ai host"
 					: credentials.openRouterBaseUrl.includes('@')
-						? 'Base URL must not include userinfo'
-						: 'OpenRouter Base URL must use openrouter.ai or a subdomain of openrouter.ai';
+						? "'OpenRouter Base URL' must not include userinfo"
+						: "'OpenRouter Base URL' must use openrouter.ai or a subdomain of openrouter.ai";
 			await expect(f.run()).rejects.toBeInstanceOf(NodeOperationError);
 			await expect(f.run()).rejects.toThrow(expectedMessage);
 			await expect(getModels.call(f.context as never)).rejects.toThrow(expectedMessage);
@@ -1715,7 +1715,9 @@ describe.each(['nace', 'openrouter'])('%s response validation and missing IDs', 
 				expect(error.message).toBe(
 					`Unexpected response from ${backend === 'openrouter' ? 'OpenRouter' : 'Nace'} [Item 1]`,
 				);
-				expect(error.description).toBe('Expected a JSON object in the response body. [Item 1]');
+				expect(error.description).toBe(
+					'Expected a JSON object in the response body. Retry the request. If it happens again, contact Nace support and include the request ID when available.\nRequest ID: req-header [Item 1]',
+				);
 				return true;
 			});
 		},
@@ -1909,7 +1911,9 @@ describe('security review round one', () => {
 		{ backend: 'openrouter', openRouterBaseUrl: 'http://openrouter.ai/api' },
 	])('requires HTTPS on a non-local backend: $backend', async (credentials) => {
 		const f = fake({}, credentials);
-		await expect(f.run()).rejects.toThrow('Base URL must use HTTPS');
+		await expect(f.run()).rejects.toThrow(
+			`'${credentials.backend === 'openrouter' ? 'OpenRouter Base URL' : 'Base URL'}' must use HTTPS`,
+		);
 		expect(f.http).not.toHaveBeenCalled();
 		const check = await credentialCheck(credentials);
 		expect(check.result).toMatchObject({
@@ -2251,7 +2255,7 @@ describe('security review round one', () => {
 	it.each(['stateJson', 'questionsJson'])('reports invalid %s JSON before HTTP', async (name) => {
 		const f = fake({ [name]: '{broken', ...(name === 'stateJson' ? { stateFormat: 'json' } : {}) });
 		await expect(f.run()).rejects.toThrow(
-			`${name === 'stateJson' ? 'State (JSON)' : 'Questions (JSON)'} must be valid JSON`,
+			`'${name === 'stateJson' ? 'State (JSON)' : 'Questions (JSON)'}' must be valid JSON`,
 		);
 		expect(f.http).not.toHaveBeenCalled();
 	});
@@ -2483,7 +2487,7 @@ describe('declarative credential tests and verified-node wording', () => {
 		f.raw.continueOnFail = () => true;
 		const result = await f.run();
 		expect(result[0][1].json.error).toBe(
-			'Model Name or ID: OpenRouter models must start with nace-ai/. Try nace-ai/drex-v2.0. [Item 2]',
+			"'Model Name or ID': OpenRouter models must start with nace-ai/. Try nace-ai/drex-v2.0. [Item 2]",
 		);
 		expect(result[0][1].pairedItem).toEqual({ item: 1 });
 		expect(f.http).toHaveBeenCalledTimes(1);
@@ -2496,7 +2500,7 @@ describe('declarative credential tests and verified-node wording', () => {
 			body: { error: { type: 'authentication_error', message: 'Invalid token' } },
 		});
 		await expect(f.run()).rejects.toSatisfy((issue: NodeApiError) => {
-			expect(issue.message).toBe('API Key: Check your Nace API credential. [Item 1]');
+			expect(issue.message).toBe("'API Key': Check your Nace API credential. [Item 1]");
 			expect(issue.description).toContain('Type: authentication_error');
 			expect(issue.description).not.toContain('Error type:');
 			expect(issue.message + issue.description).not.toMatch(
@@ -2510,7 +2514,7 @@ describe('declarative credential tests and verified-node wording', () => {
 		f.http.mockResolvedValue(response({ approved: null }));
 		await expect(f.run()).rejects.toSatisfy((issue: NodeApiError) => {
 			expect(issue.description).toBe(
-				'Questions: Question approved: expected an answer object [Item 1]',
+				"'Questions': Question approved: expected an answer object. Retry the request. If it happens again, contact Nace support and include the request ID when available.\nRequest ID: req-test [Item 1]",
 			);
 			expect(issue.message.match(/\[Item 1\]/g)).toHaveLength(1);
 			return true;

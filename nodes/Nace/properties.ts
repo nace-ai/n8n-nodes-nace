@@ -228,13 +228,13 @@ export const properties: INodeProperties[] = [
 		displayOptions: { show: { operation: ['route'] } },
 	},
 	{
-		displayName: 'Image Binary Properties',
+		displayName: 'Input Binary Fields',
 		name: 'imageProperties',
 		type: 'string',
 		default: '',
 		placeholder: 'e.g. image1,image2',
 		description:
-			'Comma-separated binary property names in Image 1, Image 2 order. Only drex-max models support images.',
+			'Comma-separated input binary field names in Image 1, Image 2 order. Only drex-max models support images.',
 	},
 	{
 		displayName: 'Options',

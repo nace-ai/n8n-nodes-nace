@@ -58,6 +58,7 @@ export class NaceApi implements ICredentialType {
 		requestOptions: T,
 	): Promise<T> {
 		const baseUrl = resolveBaseUrl(credentials);
+		const parameter = credentials.backend === 'openrouter' ? 'OpenRouter Base URL' : 'Base URL';
 		const targets = [requestOptions.uri, requestOptions.url].filter(
 			(target) => target !== undefined,
 		);
@@ -66,12 +67,14 @@ export class NaceApi implements ICredentialType {
 			if (!targets.length) throw new Error('Missing request target');
 			requestUrls = targets.map((target) => new URL(target, requestOptions.baseURL));
 		} catch {
-			throw new Error('Nace API credentials require a valid absolute request URL or baseURL.');
+			throw new Error(
+				`Nace API credentials require an absolute request URL. Set the request URL to an HTTP or HTTPS URL using the origin in the credential's '${parameter}' field.`,
+			);
 		}
 		const origin = new URL(baseUrl).origin;
 		if (requestUrls.some((url) => url.origin !== origin)) {
 			throw new Error(
-				'Nace API credentials can only be used for requests to the configured base URL origin.',
+				`Nace API credentials can only be used for requests to the origin in '${parameter}'. Change the request URL to use that origin, or set the credential's '${parameter}' to the intended service URL.`,
 			);
 		}
 		return {

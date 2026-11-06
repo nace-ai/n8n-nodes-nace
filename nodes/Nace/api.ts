@@ -122,6 +122,7 @@ export async function request(
 					backend,
 					'Expected a JSON object in the response body.',
 					itemIndex,
+					requestId,
 				);
 			const result = cleanJson(data, secret) as IDataObject;
 			if (requestId !== undefined)
@@ -136,7 +137,7 @@ export async function request(
 		const error = isObject(data?.error) ? data.error : {};
 		const message =
 			response.statusCode === 401
-				? 'API Key: Check your Nace API credential.'
+				? "'API Key': Check your Nace API credential."
 				: response.statusCode === 402
 					? `Insufficient funds. Add funds in Billing: ${billing}`
 					: cleanText(error.message, secret, `Drex API returned status ${response.statusCode}`);
@@ -158,6 +159,8 @@ export async function getModels(this: ILoadOptionsFunctions): Promise<INodePrope
 			String(credentials.apiKey || ''),
 			credentials.backend === 'openrouter' ? 'OpenRouter' : 'Nace',
 			'Expected a models array.',
+			undefined,
+			scalarId(data.request_id),
 		);
 	return models
 		.filter(isObject)
