@@ -1,6 +1,16 @@
 # Changelog
 
+## 0.1.1
+
+- First release published from GitHub Actions with npm provenance, as n8n requires for verified community nodes. No functional changes from 0.1.0; the client version in `User-Agent` and `X-Nace-Client` is now 0.1.1.
+
 ## 0.1.0
+
+- The package is published as `@nace-ai/n8n-nodes-nace`. The node type is `@nace-ai/n8n-nodes-nace.nace`.
+- The API key is only sent to the origin of the credential's base URL, including from the HTTP Request node.
+- Simplify reads each answer's value from the field that matches its validated type.
+- With On Error set to Continue, failed items keep the error description and the input fields. Continue (using error output) still routes them to the Error output.
+- Messages quote parameter names and say how to fix the issue. "Image Binary Properties" is now labelled "Input Binary Fields".
 
 - Require HTTPS except local Nace development endpoints; reject URL userinfo, queries, and fragments and normalize endpoint paths.
 - Use n8n’s standard declarative credential test with validated, normalized URLs and n8n status/message reporting. Remove the node-level tester and deprecated-helper exemption.
