@@ -47,7 +47,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-tarball
-          path: n8n-nodes-nace-*.tgz
+          path: nace-ai-n8n-nodes-nace-*.tgz
           if-no-files-found: error
           retention-days: 7
 
@@ -69,6 +69,6 @@ jobs:
           path: package
       - name: Publish tarball with provenance
         run: |
-          set -- package/n8n-nodes-nace-*.tgz
+          set -- package/nace-ai-n8n-nodes-nace-*.tgz
           [ "$#" -eq 1 ] && [ -f "$1" ]
           npm publish "$1" --provenance --access public --ignore-scripts

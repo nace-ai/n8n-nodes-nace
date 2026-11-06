@@ -6,7 +6,7 @@ import { itemText } from './safety';
 const credentialContext: INode = {
 	id: 'nace-api-credential',
 	name: 'Nace API',
-	type: 'n8n-nodes-nace.nace',
+	type: '@nace-ai/n8n-nodes-nace.nace',
 	typeVersion: 1,
 	position: [0, 0],
 	parameters: {},

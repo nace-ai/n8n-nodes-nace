@@ -55,7 +55,7 @@
     {
       "id": "drex-approval-gate",
       "name": "Drex approval gate",
-      "type": "n8n-nodes-nace.naceTool",
+      "type": "@nace-ai/n8n-nodes-nace.naceTool",
       "typeVersion": 1,
       "position": [
         460,

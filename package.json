@@ -1,5 +1,5 @@
 {
-  "name": "n8n-nodes-nace",
+  "name": "@nace-ai/n8n-nodes-nace",
   "version": "0.1.0",
   "description": "Evaluate, classify, score, and route content with Drex by Nace",
   "license": "MIT",

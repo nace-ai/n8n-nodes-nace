@@ -128,7 +128,7 @@ function fake(
 		getNode: () => ({
 			id: 'test',
 			name: 'Drex by Nace',
-			type: 'n8n-nodes-nace.nace',
+			type: '@nace-ai/n8n-nodes-nace.nace',
 			typeVersion: 1,
 			position: [0, 0],
 			parameters: values,
@@ -522,7 +522,7 @@ describe('errors, retries, and routing', () => {
 			f.raw.getNode = () => ({ ...getNode(), onError: 'continueRegularOutput' as const });
 			if (mode === 'tool') {
 				const getNode = f.raw.getNode;
-				f.raw.getNode = () => ({ ...getNode(), type: 'n8n-nodes-nace.naceTool' });
+				f.raw.getNode = () => ({ ...getNode(), type: '@nace-ai/n8n-nodes-nace.naceTool' });
 			}
 			f.raw.continueOnFail = () => true;
 			f.http.mockResolvedValue({
@@ -577,7 +577,7 @@ describe('errors, retries, and routing', () => {
 			const getNode = f.raw.getNode;
 			f.raw.getNode = () => ({
 				...getNode(),
-				...(mode === 'tool' ? { type: 'n8n-nodes-nace.naceTool' } : {}),
+				...(mode === 'tool' ? { type: '@nace-ai/n8n-nodes-nace.naceTool' } : {}),
 				onError: 'continueErrorOutput' as const,
 			});
 			f.raw.continueOnFail = () => true;
@@ -1135,7 +1135,7 @@ describe('review regressions', () => {
 				confidenceThreshold: 0.5,
 			});
 			const getNode = f.raw.getNode;
-			f.raw.getNode = () => ({ ...getNode(), type: 'n8n-nodes-nace.naceTool' });
+			f.raw.getNode = () => ({ ...getNode(), type: '@nace-ai/n8n-nodes-nace.naceTool' });
 			f.http.mockResolvedValue(response({ route: { ...answerSet.choice, confidence } }));
 			const result = await f.run();
 			expect(result).toHaveLength(1);
@@ -1152,7 +1152,7 @@ describe('review regressions', () => {
 			[{ json: {} }, { json: {} }, { json: {} }],
 		);
 		const getNode = f.raw.getNode;
-		f.raw.getNode = () => ({ ...getNode(), type: 'n8n-nodes-nace.naceTool' });
+		f.raw.getNode = () => ({ ...getNode(), type: '@nace-ai/n8n-nodes-nace.naceTool' });
 		f.http
 			.mockResolvedValueOnce(response({ route: { ...answerSet.choice, choice: 'billing' } }))
 			.mockResolvedValueOnce(response({ route: answerSet.choice }))
@@ -1172,7 +1172,7 @@ describe('review regressions', () => {
 			labels: { label: [{ label: 'billing' }, { label: 'support' }] },
 		});
 		const getNode = f.raw.getNode;
-		f.raw.getNode = () => ({ ...getNode(), type: 'n8n-nodes-nace.naceTool' });
+		f.raw.getNode = () => ({ ...getNode(), type: '@nace-ai/n8n-nodes-nace.naceTool' });
 		f.raw.continueOnFail = () => true;
 		f.http.mockResolvedValue(response({}, 422));
 		const result = await f.run();
