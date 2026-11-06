@@ -166,7 +166,12 @@ export class Nace implements INodeType {
 						Object.entries(answers).map(([id, answer]) => [
 							id,
 							{
-								value: answer.choice ?? answer.score ?? answer.noul,
+								value:
+									answer.type === 'noul'
+										? answer.noul
+										: answer.type === 'choice'
+											? answer.choice
+											: answer.score,
 								confidence: answer.confidence,
 							},
 						]),

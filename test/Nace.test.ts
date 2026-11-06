@@ -335,6 +335,36 @@ describe('typed evaluation', () => {
 			},
 		});
 	});
+	it.each([
+		{
+			question: noul,
+			answer: { type: 'noul', noul: 0, choice: 'approved', confidence: 1 },
+			value: 0,
+		},
+		{
+			question: noul,
+			answer: { type: 'noul', noul: 0, score: 99, confidence: 1 },
+			value: 0,
+		},
+		{
+			question: choice,
+			answer: { type: 'choice', choice: 'support', noul: 0, score: 99, confidence: 1 },
+			value: 'support',
+		},
+		{
+			question: score,
+			answer: { type: 'score', score: 0, choice: 'approved', noul: 1, confidence: 1 },
+			value: 0,
+		},
+	])(
+		'simplifies only the validated $answer.type field despite conflicting fields',
+		async ({ question, answer, value }) => {
+			const f = fake({ questionsJson: { decision: question }, options: { simplify: true } });
+			f.http.mockResolvedValue(response({ decision: answer }));
+			const result = await f.run();
+			expect(result[0][0].json.answers).toEqual({ decision: { value, confidence: 1 } });
+		},
+	);
 	it('supports JSON state, whole input and simplify with other input fields', async () => {
 		const f = fake({
 			questionsJson: { noul, choice, score },
