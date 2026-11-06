@@ -2279,7 +2279,7 @@ describe('security review round one', () => {
 		expect(build).toContain('npm run build');
 		expect(build).toContain('npm pack');
 		expect(build).toContain('actions/upload-artifact@');
-		expect(publish).toContain("'v*.*.*'");
+		expect(publish).toContain("- '*.*.*'");
 		expect(publish).toContain('workflow_dispatch:');
 		expect(release).toContain('needs: build');
 		expect(release).toContain('id-token: write');

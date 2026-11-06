@@ -241,7 +241,7 @@ The package has no runtime dependencies. It uses `n8n-workflow` as a peer. Tests
 
 CI and publishing both run unit tests before proceeding. The development CLI is pinned to `0.55.5`. Workflow actions are pinned by commit SHA. Checkouts have read-only permissions and do not persist credentials.
 
-Publishing runs on tags matching `v*.*.*` or by manual dispatch. A build job installs dependencies, lints, tests, builds, and packs the package without OIDC publishing permission. It uploads the tested tarball. A separate publish job downloads that artifact and runs `npm publish <tarball> --provenance --access public --ignore-scripts`. It does not install dependencies or execute package lifecycle scripts.
+Publishing runs on version tags matching `*.*.*` (the format `npm run release` creates, such as `1.2.3`) or by manual dispatch. A build job installs dependencies, lints, tests, builds, and packs the package without OIDC publishing permission. It uploads the tested tarball. A separate publish job downloads that artifact and runs `npm publish <tarball> --provenance --access public --ignore-scripts`. It does not install dependencies or execute package lifecycle scripts.
 
 Before release, configure npm trusted publishing for owner `nace-ai`, repository `n8n-nodes-nace`, workflow `publish.yml`, and environment `npm-publish`. Create that GitHub environment and require reviewers. The publish job uses GitHub OIDC; no `NPM_TOKEN` is needed. A manual run publishes the selected ref after checks and environment approval. Development checks do not publish the package.
 
