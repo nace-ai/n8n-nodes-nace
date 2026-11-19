@@ -223,6 +223,26 @@ Only the OpenRouter backend uses its generation `id`, such as `gen-dec-...`, as 
 
 All API requests, model loading, and credential tests include `User-Agent` and `X-Nace-Client`. Both are set to `n8n-nodes-nace/<package version>`.
 
+## Nace Document Intelligence node
+
+**Nace Document Intelligence** parses documents, extracts structured data from them, and answers questions about the files of a Nace workspace. It uses the same **Nace API** credential as the Drex node, with the Nace backend only.
+
+| Operation | What it does |
+| --- | --- |
+| **Document: Parse** | Turns a document into Markdown, text, or blocks for later nodes |
+| **Document: Extract** | Fills a JSON schema with typed fields, each with a status and citations |
+| **Workspace: Search** | Answers a question about the files of a workspace, with evidence and confidence. Works well as an AI Agent tool |
+
+A document comes from one of two sources: an **Input Binary Field** of an earlier node, or a public **URL** (HTTPS only). For a URL without a file name, set **File Name**; names need an extension.
+
+When the source is a binary file, the node uploads it to your Nace account, runs the job, and then deletes the uploaded file. The node also deletes the job unless Keep Job is on. A job that does not finish within Max Wait (Seconds) is cancelled unless Keep Job is on. Each job create carries an Idempotency-Key, so a retry after a rate limit does not start a second job. Uploads go to the granted upload URL with an upload token; the API key is never sent to the upload host.
+
+On zero-retention accounts, use the URL source; standalone binary uploads are refused with 422. Results larger than 1 MiB return a preview plus the API's disclosures instead of the full payload.
+
+Every output contains `job_id`, `request_id` when available, and `cost`, plus the job result: `document` for Parse, `data` and `fields` for Extract, and `answer`, `confidence`, `evidences`, and `structured_answer` for Search. Document outputs also report the `cleanup` flags `job_deleted` and `file_deleted`. `file_deleted` is true only when Nace confirmed the deletion; if it is false, check the file in your Nace account.
+
+Search needs a workspace with ingested files. Create a workspace and ingest its files in the Nace console or with the Workspaces API. Search answers questions with citations; it does not return ranked passages or scores.
+
 ## Example workflows
 
 Import JSON from [examples/](examples/). Then select credentials by name.

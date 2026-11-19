@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add the **Nace Document Intelligence** node (type `@nace-ai/n8n-nodes-nace.naceDocumentIntelligence`) with Document Parse, Document Extract, and Workspace Search operations. It uses the same Nace API credential; the OpenRouter backend is refused for document operations.
+- Binary sources upload to a unique `n8n/` path using the granted upload URL and upload token, never the API key. The node deletes the uploaded file after the job and also deletes the job unless Keep Job is on, also when the job fails.
+- Job calls wait with `wait_seconds` and poll until the final status, up to Max Wait (Seconds); a job that does not finish in time is cancelled unless Keep Job is on. Each job create carries an `Idempotency-Key`. Every output carries `job_id`, `request_id` when available, and `cost`.
+- Add mocked unit tests with synthetic data for the new node.
+
 ## 0.1.1
 
 - First release published from GitHub Actions with npm provenance, as n8n requires for verified community nodes. No functional changes from 0.1.0; the client version in `User-Agent` and `X-Nace-Client` is now 0.1.1.
