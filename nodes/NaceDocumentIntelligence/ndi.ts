@@ -7,7 +7,7 @@ import type {
 	INode,
 	INodePropertyOptions,
 } from 'n8n-workflow';
-import { NodeOperationError, randomString, sleep } from 'n8n-workflow';
+import { NodeApiError, NodeOperationError, randomString, sleep } from 'n8n-workflow';
 import { retryDelay } from '../Nace/api';
 import { CLIENT } from '../Nace/constants';
 import { resolveBaseUrl } from '../Nace/baseUrl';
@@ -52,9 +52,14 @@ interface NdiRequest {
 	headers?: Record<string, string>;
 	// A 503 whose body has error.code job_pending may mean the job create is already running.
 	retryJobPending?: boolean;
+	// Epoch milliseconds. No request is sent at or after this job deadline, and each request's
+	// HTTP timeout is capped to the remaining time before it.
+	deadline?: number;
 	timeout: number;
 	itemIndex?: number;
 }
+// Nace keeps an HTTP request open for at most 100 seconds, so wait_seconds cannot exceed it.
+const SERVER_WAIT_LIMIT = 100;
 const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 const RETRIES = 5;
 const GRANT_TIMEOUT = 60000;
@@ -77,6 +82,18 @@ function uploadPathDescription(path: string): string {
 }
 export function lastSegment(name: string): string {
 	return name.split(/[\\/]/).pop() || '';
+}
+// Upload ids reach output cleanup and delete URLs, so they must be plain identifiers: never echoes
+// of the API key or upload token, and never whitespace or control characters.
+function safeUploadId(value: unknown, secret: string, token: string): string | undefined {
+	if (typeof value !== 'string' || !value || value === secret || value === token) return undefined;
+	if (value.length > 256 || /\s/.test(value)) return undefined;
+	return Array.from(value).every((char) => {
+		const code = char.charCodeAt(0);
+		return code > 31 && code !== 127;
+	})
+		? value
+		: undefined;
 }
 export async function ndiRequest(
 	context: NdiRequestContext,
@@ -110,7 +127,11 @@ export async function ndiRequest(
 			method: request.method,
 			url: `${baseUrl}${request.path}`,
 			headers,
-			timeout: request.timeout,
+			// With a job deadline, an HTTP request never outlives the remaining Max Wait budget.
+			timeout:
+				request.deadline === undefined
+					? request.timeout
+					: Math.max(1, Math.min(request.timeout, request.deadline - Date.now())),
 			maxResponseBodyBytes: MAX_RESPONSE_BYTES,
 			json: true,
 			returnFullResponse: true,
@@ -145,15 +166,21 @@ export async function ndiRequest(
 			response.statusCode === 503 &&
 			isObject(data?.error) &&
 			data.error.code === 'job_pending';
+		const delay = Math.min(retryDelay(responseHeaders, attempt), 60000, 120000 - totalSleep);
+		// Max Wait bounds retries too: a retry whose send would land at or after the job deadline is
+		// not made, so the last response's error surfaces instead.
+		const sendableBeforeDeadline =
+			request.deadline === undefined || Date.now() + delay < request.deadline;
 		if (
 			([429, 529].includes(response.statusCode) || jobPending) &&
 			attempt < RETRIES &&
-			totalSleep < 120000
+			totalSleep < 120000 &&
+			sendableBeforeDeadline
 		) {
-			const delay = Math.min(retryDelay(responseHeaders, attempt), 60000, 120000 - totalSleep);
 			await sleep(delay);
 			totalSleep += delay;
-			continue;
+			// Timers can fire late; recheck so a retry never starts after the deadline.
+			if (request.deadline === undefined || Date.now() < request.deadline) continue;
 		}
 		const requestId =
 			scalarId(data?.request_id) ?? scalarId(firstHeader(responseHeaders['x-request-id']));
@@ -170,13 +197,17 @@ export async function ndiRequest(
 					? 'Insufficient funds. Add funds in Billing: https://console.nace.ai'
 					: cleanText(error.message, secret, `Nace API returned status ${response.statusCode}`);
 		const code = cleanText(error.code, secret);
-		throw apiFailure(node, secret, data, {
+		// A rejected job create can still retain the request data; Nace names that job in this header.
+		const rejectedJobId = scalarId(firstHeader(responseHeaders['x-drex-document-job']));
+		const failure = apiFailure(node, secret, data, {
 			status: response.statusCode,
 			message,
 			...(code === '' ? {} : { description: `Code: ${code}` }),
 			requestId,
 			itemIndex: request.itemIndex,
-		});
+		}) as NodeApiError & { jobId?: string | number };
+		if (rejectedJobId !== undefined) failure.jobId = rejectedJobId;
+		throw failure;
 	}
 }
 export async function uploadBinary(
@@ -307,14 +338,23 @@ export async function uploadBinary(
 		isObject(data) && isObject(data.result) && isObject(data.result.file)
 			? (data.result as IDataObject).file
 			: undefined;
-	if (
-		response.statusCode >= 200 &&
-		response.statusCode < 300 &&
-		isObject(file) &&
-		typeof file.file_id === 'string' &&
-		typeof file.workspace_id === 'string'
-	)
-		return { workspaceId: file.workspace_id, fileId: file.file_id };
+	const uploaded =
+		isObject(file)
+			? {
+					fileId: safeUploadId(file.file_id, secret, grant.token),
+					workspaceId: safeUploadId(file.workspace_id, secret, grant.token),
+				}
+			: undefined;
+	if (response.statusCode >= 200 && response.statusCode < 300) {
+		if (uploaded?.fileId !== undefined && uploaded?.workspaceId !== undefined)
+			return { workspaceId: uploaded.workspaceId, fileId: uploaded.fileId };
+		throw apiFailure(node, secret, {}, {
+			status: response.statusCode,
+			message: 'Nace upload did not return a usable file and workspace ID.',
+			description: uploadPathDescription(path),
+			itemIndex,
+		});
+	}
 	const cleaned = isObject(data) ? (cleanJson(data, grant.token) as IDataObject) : {};
 	const error = isObject(cleaned.error) ? cleaned.error : {};
 	throw apiFailure(node, secret, cleaned, {
@@ -336,19 +376,43 @@ export async function runJob(
 	const credentials = await context.getCredentials('naceApi');
 	const secret = String(credentials.apiKey || '');
 	const started = Date.now();
-	const createWait = Math.max(1, Math.min(60, Math.ceil(maxWaitSeconds)));
+	// Max Wait bounds the whole job run: create waits, retries, and polling never continue past it.
+	const deadline = started + maxWaitSeconds * 1000;
+	// The create wait uses the whole budget up to the longest Nace keeps an HTTP request open, so a
+	// finished job is delivered directly; polling cannot recover a result that Nace did not retain.
+	const createWait = Math.max(1, Math.min(SERVER_WAIT_LIMIT, Math.ceil(maxWaitSeconds)));
 	// One key per runJob call: retries of this create reuse it, so Nace returns the same job.
 	const idempotencyKey = `n8n-${randomString(32)}`;
-	let { data: job, requestId } = await ndiRequest(context, {
-		method: 'POST',
-		path,
-		qs: { wait_seconds: createWait },
-		body,
-		headers: { 'Idempotency-Key': idempotencyKey },
-		retryJobPending: true,
-		timeout: (createWait + 30) * 1000,
-		itemIndex,
-	});
+	const didNotFinish = (id: string): NodeOperationError =>
+		new NodeOperationError(
+			node,
+			itemText(
+				`The job ${id} did not finish in ${maxWaitSeconds} seconds. Increase 'Max Wait (Seconds)'.`,
+				itemIndex,
+			),
+			{ itemIndex },
+		);
+	let job: IDataObject;
+	let requestId: string | number | undefined;
+	try {
+		({ data: job, requestId } = await ndiRequest(context, {
+			method: 'POST',
+			path,
+			qs: { wait_seconds: createWait },
+			body,
+			headers: { 'Idempotency-Key': idempotencyKey },
+			retryJobPending: true,
+			timeout: (createWait + 30) * 1000,
+			deadline,
+			itemIndex,
+		}));
+	} catch (error) {
+		// A rejected create can still leave a job with the retained request data; keep its id for cleanup.
+		const rejectedJobId = scalarId((error as { jobId?: unknown }).jobId);
+		if (jobId !== undefined && rejectedJobId !== undefined) jobId.current = String(rejectedJobId);
+		// ndiRequest already builds node errors; re-wrap so the rejection keeps its message and description.
+		throw operationFailure(node, secret, error, itemIndex);
+	}
 	for (;;) {
 		const id = typeof job.job_id === 'string' ? job.job_id : undefined;
 		if (id !== undefined && jobId) jobId.current = id;
@@ -362,6 +426,8 @@ export async function runJob(
 				itemIndex,
 				requestId,
 			);
+		// A result that arrives after the deadline is a timeout, not a success.
+		if (Date.now() >= deadline) throw didNotFinish(id);
 		if (FINAL_STATES.includes(status)) {
 			const error = isObject(job.error) ? job.error : {};
 			if (status !== 'succeeded') {
@@ -373,7 +439,14 @@ export async function runJob(
 					itemIndex,
 				});
 			}
-			if (!isObject(job.result))
+			if (!isObject(job.result)) {
+				if (job.result_state === 'not_retained')
+					throw apiFailure(node, secret, {}, {
+						message: `The result of job ${id} was not retained.`,
+						description: `Zero-retention accounts deliver a result only while the create request waits, so polling cannot recover it. Increase 'Max Wait (Seconds)' so the create can wait for the job (it waits up to ${SERVER_WAIT_LIMIT} seconds), or open the job in your Nace console. Running this node again starts a new job and can bill again.\nJob ID: ${id}`,
+						requestId,
+						itemIndex,
+					});
 				throw unexpected(
 					node,
 					secret,
@@ -382,25 +455,19 @@ export async function runJob(
 					itemIndex,
 					requestId,
 				);
+			}
 			return { job, requestId };
 		}
-		if (Date.now() - started > maxWaitSeconds * 1000)
-			throw new NodeOperationError(
-				node,
-				itemText(
-					`The job ${id} did not finish in ${maxWaitSeconds} seconds. Increase 'Max Wait (Seconds)'.`,
-					itemIndex,
-				),
-				{ itemIndex },
-			);
-		await sleep(1000);
-		const remaining = Math.ceil((maxWaitSeconds * 1000 - (Date.now() - started)) / 1000);
-		const pollWait = Math.max(1, Math.min(25, remaining));
+		await sleep(Math.min(1000, deadline - Date.now()));
+		// No poll is issued at or past the deadline: its response could not be accepted.
+		if (Date.now() >= deadline) throw didNotFinish(id);
+		const pollWait = Math.max(1, Math.min(25, Math.floor((deadline - Date.now()) / 1000)));
 		const poll = await ndiRequest(context, {
 			method: 'GET',
 			path: `/v1/documents/jobs/${encodeURIComponent(id)}`,
 			qs: { wait_seconds: pollWait },
 			timeout: (pollWait + 30) * 1000,
+			deadline,
 			itemIndex,
 		});
 		job = poll.data;

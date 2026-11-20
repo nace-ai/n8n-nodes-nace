@@ -83,7 +83,7 @@ const documentOptions: INodeProperties[] = [
 		type: 'boolean',
 		default: false,
 		description:
-			'Whether to keep the job in your Nace account. The node deletes the job after reading the result by default.',
+			'Whether to keep the job in your Nace account. The node deletes the job after reading the result by default; a Parse result with a content_url or rows_url always keeps its job.',
 	},
 	{
 		displayName: 'Max Wait (Seconds)',

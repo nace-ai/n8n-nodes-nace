@@ -131,7 +131,7 @@ describe('Nace Document Intelligence', () => {
 		expect(f.auth.mock.calls[0][1]).toMatchObject({
 			method: 'POST',
 			url: 'https://console.nace.ai/v1/documents/parse',
-			qs: { wait_seconds: 60 },
+			qs: { wait_seconds: 100 },
 			body: {
 				source: {
 					type: 'url',
@@ -159,6 +159,189 @@ describe('Nace Document Intelligence', () => {
 			pairedItem: { item: 0 },
 		});
 		expect(result[0][0].json.cleanup).not.toHaveProperty('file_deleted');
+	});
+
+	it('keeps the job when the result has a content_url so the link stays usable', async () => {
+		const contentUrl = 'https://console.nace.ai/v1/documents/jobs/job-20/content';
+		const f = fake();
+		f.auth
+			.mockResolvedValueOnce(
+				full(
+					200,
+					job('job-20', 'succeeded', {
+						document: { preview: 'The first pages of a very large document' },
+						content_url: contentUrl,
+						disclosures: [{ code: 'large_result', message: 'The result exceeds 1 MiB' }],
+					}),
+				),
+			)
+			.mockResolvedValue(full(204, ''));
+		const result = await f.run();
+		// Deleting the job would break the content_url for later nodes, so only the create runs.
+		expect(f.auth).toHaveBeenCalledTimes(1);
+		expect(result[0][0].json).toMatchObject({
+			job_id: 'job-20',
+			content_url: contentUrl,
+			cleanup: { job_kept: 'content_url' },
+		});
+		expect(result[0][0].json.cleanup).not.toHaveProperty('job_deleted');
+		// A nested document.content_url also keeps the job, while the uploaded file is still deleted.
+		const nested = fake(
+			{ source: 'binary', binaryPropertyName: 'data' },
+			{},
+			[{ json: {}, binary: { data: invoice } }],
+			{ data: invoiceBytes },
+		);
+		nested.auth
+			.mockResolvedValueOnce(grant())
+			.mockResolvedValueOnce(
+				full(
+					200,
+					job('job-21', 'succeeded', {
+						document: { preview: 'preview', content_url: `${contentUrl}-nested` },
+					}),
+				),
+			)
+			.mockResolvedValueOnce(full(200, { status: 'deleted' }));
+		nested.plain.mockResolvedValueOnce(uploadJob());
+		const nestedResult = await nested.run();
+		expect(nested.auth).toHaveBeenCalledTimes(3);
+		expect(nested.auth.mock.calls[2][1]).toMatchObject({
+			method: 'DELETE',
+			url: 'https://console.nace.ai/v1/documents/workspaces/ws-9/files/file-7',
+		});
+		expect(nestedResult[0][0].json.cleanup).toEqual({ job_kept: 'content_url', file_deleted: true });
+	});
+
+	it('keeps the job when a content_url is nested anywhere in the result, such as spreadsheet sheets', async () => {
+		const sheets = fake();
+		sheets.auth
+			.mockResolvedValueOnce(
+				full(
+					200,
+					job('job-24', 'succeeded', {
+						document: {
+							preview: 'A large spreadsheet',
+							spreadsheet: {
+								sheets: [
+									{
+										sheet: 'Sheet1',
+										content_url:
+											'https://console.nace.ai/v1/documents/jobs/job-24/content/sheet-1',
+									},
+									{
+										sheet: 'Sheet2',
+										content_url:
+											'https://console.nace.ai/v1/documents/jobs/job-24/content/sheet-2',
+									},
+								],
+							},
+						},
+					}),
+				),
+			)
+			.mockResolvedValue(full(204, ''));
+		const sheetsResult = await sheets.run();
+		expect(sheets.auth).toHaveBeenCalledTimes(1);
+		expect(sheetsResult[0][0].json.cleanup).toEqual({ job_kept: 'content_url' });
+		expect(sheetsResult[0][0].json.cleanup).not.toHaveProperty('job_deleted');
+		// Any other nested content_url works the same, for example inside an attachments array.
+		const attached = fake();
+		attached.auth
+			.mockResolvedValueOnce(
+				full(
+					200,
+					job('job-25', 'succeeded', {
+						document: { preview: 'preview' },
+						attachments: [
+							{ name: 'annex.pdf', content_url: 'https://console.nace.ai/v1/documents/jobs/job-25/content/annex' },
+						],
+					}),
+				),
+			)
+			.mockResolvedValue(full(204, ''));
+		const attachedResult = await attached.run();
+		expect(attached.auth).toHaveBeenCalledTimes(1);
+		expect(attachedResult[0][0].json.cleanup).toEqual({ job_kept: 'content_url' });
+	});
+
+	it('keeps the job when a parse result carries a rows_url download link', async () => {
+		const top = fake();
+		top.auth
+			.mockResolvedValueOnce(
+				full(
+					200,
+					job('job-26', 'succeeded', {
+						document: { preview: 'A large spreadsheet' },
+						rows_url: 'https://console.nace.ai/v1/documents/jobs/job-26/rows',
+					}),
+				),
+			)
+			.mockResolvedValue(full(204, ''));
+		const topResult = await top.run();
+		expect(top.auth).toHaveBeenCalledTimes(1);
+		expect(topResult[0][0].json.cleanup).toEqual({ job_kept: 'rows_url' });
+		const sheet = fake();
+		sheet.auth
+			.mockResolvedValueOnce(
+				full(
+					200,
+					job('job-26b', 'succeeded', {
+						document: {
+							spreadsheet: {
+								sheets: [
+									{
+										sheet: 'Sheet1',
+										rows_url: 'https://console.nace.ai/v1/documents/jobs/job-26b/rows',
+									},
+								],
+							},
+						},
+					}),
+				),
+			)
+			.mockResolvedValue(full(204, ''));
+		const sheetResult = await sheet.run();
+		expect(sheet.auth).toHaveBeenCalledTimes(1);
+		expect(sheetResult[0][0].json.cleanup).toEqual({ job_kept: 'rows_url' });
+	});
+
+	it('deletes an Extract job even when extracted data has a user field named content_url', async () => {
+		const schema = {
+			type: 'object',
+			properties: { content_url: { type: 'string', description: 'A link found in the document' } },
+		};
+		const f = fake({
+			operation: 'extract',
+			url: 'https://files.example.test/report.pdf',
+			schema: JSON.stringify(schema),
+		});
+		f.auth
+			.mockResolvedValueOnce(
+				full(200, {
+					job_id: 'job-27',
+					kind: 'document_extract',
+					status: 'succeeded',
+					result: {
+						data: { content_url: 'https://files.example.test/report.pdf' },
+						fields: { content_url: { status: 'extracted', citations: ['file-9:1'] } },
+					},
+					cost: 0.02,
+				}),
+			)
+			.mockResolvedValueOnce(full(204, ''));
+		const result = await f.run();
+		// Extracted data is user data: a field named content_url must not keep the job.
+		expect(f.auth).toHaveBeenCalledTimes(2);
+		expect(f.auth.mock.calls[1][1]).toMatchObject({
+			method: 'DELETE',
+			url: 'https://console.nace.ai/v1/documents/jobs/job-27',
+		});
+		expect(result[0][0].json).toMatchObject({
+			job_id: 'job-27',
+			data: { content_url: 'https://files.example.test/report.pdf' },
+			cleanup: { job_deleted: true },
+		});
 	});
 
 	it('uploads a binary file with the token to the other origin and deletes the job, then the file', async () => {
@@ -377,6 +560,71 @@ describe('Nace Document Intelligence', () => {
 		});
 	});
 
+	it('refuses upload ids that echo the API key and never serializes them', async () => {
+		const f = fake(
+			{ source: 'binary', binaryPropertyName: 'data' },
+			{},
+			[{ json: {}, binary: { data: invoice } }],
+			{ data: invoiceBytes },
+		);
+		f.raw.continueOnFail = () => true;
+		f.auth
+			.mockResolvedValueOnce(grant())
+			.mockResolvedValueOnce(full(200, job('job-19', 'succeeded', { document: {} })))
+			.mockResolvedValueOnce(full(204, ''))
+			.mockResolvedValueOnce(full(503, { error: { message: 'Unavailable' } }));
+		f.plain.mockResolvedValueOnce(
+			full(
+				200,
+				JSON.stringify({
+					job_id: 'job-upload',
+					kind: 'file_upload',
+					status: 'succeeded',
+					result: { file: { workspace_id: 'ws-9', file_id: API_KEY } },
+				}),
+			),
+		);
+		const result = await f.run();
+		// The bogus upload response is rejected before the parse, so the key never reaches cleanup.
+		expect(JSON.stringify(result)).not.toContain(API_KEY);
+		expect(f.auth).toHaveBeenCalledTimes(1);
+		expect(f.plain).toHaveBeenCalledTimes(1);
+		expect(result[0][0].json).toMatchObject({
+			error: expect.stringContaining('usable file and workspace ID'),
+			description: expect.stringContaining('delete it there'),
+		});
+	});
+
+	it('deletes the job from x-drex-document-job when a create is rejected', async () => {
+		const f = fake();
+		f.auth
+			.mockResolvedValueOnce(
+				full(
+					422,
+					{ error: { code: 'invalid_request', message: 'Rejected' } },
+					{ 'x-drex-document-job': 'job-rejected-1' },
+				),
+			)
+			.mockResolvedValueOnce(full(204, ''));
+		await expect(f.run()).rejects.toThrow('Rejected [Item 1]');
+		expect(f.auth).toHaveBeenCalledTimes(2);
+		expect(f.auth.mock.calls[1][1]).toMatchObject({
+			method: 'DELETE',
+			url: 'https://console.nace.ai/v1/documents/jobs/job-rejected-1',
+		});
+		// With Keep Job on, the rejected job is left in the account as asked.
+		const kept = fake({ options: { keepJob: true } });
+		kept.auth.mockResolvedValueOnce(
+			full(
+				422,
+				{ error: { code: 'invalid_request', message: 'Rejected' } },
+				{ 'x-drex-document-job': 'job-rejected-2' },
+			),
+		);
+		await expect(kept.run()).rejects.toThrow('Rejected [Item 1]');
+		expect(kept.auth).toHaveBeenCalledTimes(1);
+	});
+
 	it('extracts with the schema and instructions and returns data and fields', async () => {
 		const schema = {
 			type: 'object',
@@ -406,7 +654,7 @@ describe('Nace Document Intelligence', () => {
 		expect(f.auth.mock.calls[0][1]).toMatchObject({
 			method: 'POST',
 			url: 'https://console.nace.ai/v1/documents/extract',
-			qs: { wait_seconds: 60 },
+			qs: { wait_seconds: 100 },
 			body: {
 				source: {
 					type: 'url',
@@ -438,7 +686,7 @@ describe('Nace Document Intelligence', () => {
 		const pending = f.run();
 		await vi.advanceTimersByTimeAsync(2000);
 		const result = await pending;
-		expect(f.auth.mock.calls[0][1].qs).toEqual({ wait_seconds: 60 });
+		expect(f.auth.mock.calls[0][1].qs).toEqual({ wait_seconds: 100 });
 		expect(f.auth.mock.calls[1][1]).toMatchObject({
 			method: 'GET',
 			url: 'https://console.nace.ai/v1/documents/jobs/job-5',
@@ -453,6 +701,7 @@ describe('Nace Document Intelligence', () => {
 			document: { markdown: 'ok' },
 			cleanup: { job_deleted: true },
 		});
+		// Max Wait bounds polling: no extra poll is issued at or past the deadline.
 		const slow = fake({ options: { maxWait: 1 } });
 		slow.auth.mockImplementation(async () => full(202, job('job-6', 'running', null)));
 		const failure = expect(slow.run()).rejects.toThrow(
@@ -460,10 +709,118 @@ describe('Nace Document Intelligence', () => {
 		);
 		await vi.advanceTimersByTimeAsync(5000);
 		await failure;
-		expect(slow.auth).toHaveBeenCalledTimes(4);
-		expect(slow.auth.mock.calls[3][1]).toMatchObject({
+		expect(slow.auth).toHaveBeenCalledTimes(2);
+		expect(slow.auth.mock.calls[1][1]).toMatchObject({
 			method: 'DELETE',
 			url: 'https://console.nace.ai/v1/documents/jobs/job-6',
+		});
+		// Poll waits follow the remaining budget: 2 seconds, then 1, then the deadline error.
+		const paced = fake({ options: { maxWait: 3 } });
+		paced.auth
+			.mockResolvedValueOnce(full(202, job('job-6b', 'running', null)))
+			.mockResolvedValueOnce(full(202, job('job-6b', 'running', null)))
+			.mockResolvedValueOnce(full(202, job('job-6b', 'running', null)))
+			.mockResolvedValueOnce(full(202, job('job-6b', 'running', null)))
+			.mockResolvedValue(full(204, ''));
+		const pacedFailure = expect(paced.run()).rejects.toThrow(
+			"The job job-6b did not finish in 3 seconds. Increase 'Max Wait (Seconds)'. [Item 1]",
+		);
+		await vi.advanceTimersByTimeAsync(6000);
+		await pacedFailure;
+		expect(paced.auth).toHaveBeenCalledTimes(4);
+		expect(paced.auth.mock.calls[1][1].qs).toEqual({ wait_seconds: 2 });
+		expect(paced.auth.mock.calls[2][1].qs).toEqual({ wait_seconds: 1 });
+		// Each request's HTTP timeout is capped to the remaining Max Wait budget.
+		expect(paced.auth.mock.calls[0][1].timeout).toBe(3000);
+		expect(paced.auth.mock.calls[1][1].timeout).toBe(2000);
+		expect(paced.auth.mock.calls[2][1].timeout).toBe(1000);
+		expect(paced.auth.mock.calls[3][1]).toMatchObject({
+			method: 'DELETE',
+			url: 'https://console.nace.ai/v1/documents/jobs/job-6b',
+		});
+	});
+
+	it('never sends a job request at or after the Max Wait deadline', async () => {
+		vi.useFakeTimers();
+		// A rate-limit wait that cannot fit before the deadline is not retried: the 429 surfaces.
+		const exhausted = fake({ options: { maxWait: 1 } });
+		exhausted.auth
+			.mockResolvedValueOnce(
+				full(429, { error: { code: 'rate_limited', message: 'Slow down' } }, { 'retry-after': 2 }),
+			)
+			.mockResolvedValueOnce(
+				full(200, job('job-13', 'succeeded', { document: { markdown: 'late' } })),
+			)
+			.mockResolvedValue(full(204, ''));
+		const failure = expect(exhausted.run()).rejects.toThrow('Slow down [Item 1]');
+		await vi.advanceTimersByTimeAsync(5000);
+		await failure;
+		// Only the create ran: no retry POST at or after the deadline, and no job to clean up.
+		expect(exhausted.auth).toHaveBeenCalledTimes(1);
+		expect(exhausted.auth.mock.calls[0][1]).toMatchObject({
+			method: 'POST',
+			url: 'https://console.nace.ai/v1/documents/parse',
+		});
+		// The create's own HTTP timeout is capped to the remaining budget.
+		expect(exhausted.auth.mock.calls[0][1].timeout).toBe(1000);
+		// A retry that still fits before the deadline is made and can succeed.
+		const fits = fake({ options: { maxWait: 2 } });
+		fits.auth
+			.mockResolvedValueOnce(
+				full(429, { error: { code: 'rate_limited', message: 'Slow down' } }, { 'retry-after': 1 }),
+			)
+			.mockResolvedValueOnce(full(200, job('job-13b', 'succeeded', { document: { markdown: 'ok' } })))
+			.mockResolvedValueOnce(full(204, ''));
+		const pending = fits.run();
+		await vi.advanceTimersByTimeAsync(2000);
+		const result = await pending;
+		expect(fits.auth).toHaveBeenCalledTimes(3);
+		expect(result[0][0].json).toMatchObject({
+			job_id: 'job-13b',
+			document: { markdown: 'ok' },
+			cleanup: { job_deleted: true },
+		});
+	});
+
+	it('does not retry when the retry timer fires after the Max Wait deadline', async () => {
+		vi.useFakeTimers();
+		const lagged = fake({ options: { maxWait: 1 } });
+		lagged.auth
+			.mockResolvedValueOnce(
+				full(429, { error: { code: 'rate_limited', message: 'Slow down' } }, { 'retry-after': 0.9 }),
+			)
+			.mockResolvedValue(full(200, job('job-13c', 'succeeded', { document: { markdown: 'late' } })));
+		const failure = expect(lagged.run()).rejects.toThrow('Slow down [Item 1]');
+		await vi.advanceTimersByTimeAsync(899);
+		// A busy event loop: the clock passes the deadline before the 900 ms retry timer fires.
+		vi.setSystemTime(Date.now() + 200);
+		await vi.advanceTimersByTimeAsync(10);
+		await failure;
+		expect(lagged.auth).toHaveBeenCalledTimes(1);
+	});
+
+	it('reports an unretained result without suggesting a retry that would bill again', async () => {
+		vi.useFakeTimers();
+		const f = fake({ options: { maxWait: 120 } });
+		f.auth
+			.mockResolvedValueOnce(full(202, job('job-15', 'running', null)))
+			.mockResolvedValueOnce(
+				full(200, job('job-15', 'succeeded', null, { result_state: 'not_retained' })),
+			)
+			.mockResolvedValueOnce(full(204, ''));
+		const failure = expect(f.run()).rejects.toSatisfy((error: NodeApiError) => {
+			expect(error.message).toContain('not retained');
+			expect(error.message).toContain('job-15');
+			expect(error.description).not.toContain('Retry the request');
+			expect(error.description).toContain('Job ID: job-15');
+			return true;
+		});
+		await vi.advanceTimersByTimeAsync(2000);
+		await failure;
+		expect(f.auth).toHaveBeenCalledTimes(3);
+		expect(f.auth.mock.calls[2][1]).toMatchObject({
+			method: 'DELETE',
+			url: 'https://console.nace.ai/v1/documents/jobs/job-15',
 		});
 	});
 
@@ -502,7 +859,7 @@ describe('Nace Document Intelligence', () => {
 		expect(f.auth.mock.calls[0][1]).toMatchObject({
 			method: 'POST',
 			url: 'https://console.nace.ai/v1/workspaces/ws-7/automatic-search',
-			qs: { wait_seconds: 60 },
+			qs: { wait_seconds: 100 },
 			body: {
 				query: 'What is the total of invoice 42?',
 				mode: 'auto',
@@ -560,6 +917,42 @@ describe('Nace Document Intelligence', () => {
 		expect(agentResult[0][0].json.evidences).toEqual(
 			agentResult[0][0].json.output.answer.evidences,
 		);
+	});
+
+	it('always reports cost, null when Nace does not send one', async () => {
+		const search = fake({
+			resource: 'workspace',
+			operation: 'search',
+			workspaceId: 'ws-7',
+			query: 'Summarize the refunds',
+		});
+		search.auth.mockResolvedValueOnce(
+			full(200, {
+				job_id: 'job-22',
+				kind: 'automatic_search',
+				status: 'succeeded',
+				result: {
+					output: { answer: 'Two refunds', confidence: 0.5, evidences: [], structured_answer: {} },
+				},
+			}),
+		);
+		const searchResult = await search.run();
+		expect(searchResult[0][0].json.cost).toBe(null);
+		expect(JSON.stringify(searchResult[0][0].json)).toContain('"cost":null');
+		const parse = fake();
+		parse.auth
+			.mockResolvedValueOnce(
+				full(200, {
+					job_id: 'job-23',
+					kind: 'document_parse',
+					status: 'succeeded',
+					result: { document: { markdown: 'ok' } },
+				}),
+			)
+			.mockResolvedValueOnce(full(204, ''));
+		const parseResult = await parse.run();
+		expect(parseResult[0][0].json.cost).toBe(null);
+		expect(JSON.stringify(parseResult[0][0].json)).toContain('"cost":null');
 	});
 
 	it('refuses OpenRouter before HTTP and refuses a non-HTTPS upload URL without sending the token', async () => {
