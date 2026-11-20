@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - Add the **Nace Document Intelligence** node (type `@nace-ai/n8n-nodes-nace.naceDocumentIntelligence`) with Document Parse, Document Extract, and Workspace Search operations. It uses the same Nace API credential; the OpenRouter backend is refused for document operations.
 - Binary sources upload to a unique `n8n/` path using the granted upload URL and upload token, never the API key. The node deletes the uploaded file after the job and also deletes the job unless Keep Job is on, also when the job fails.

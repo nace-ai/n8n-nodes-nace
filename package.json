@@ -1,6 +1,6 @@
 {
   "name": "@nace-ai/n8n-nodes-nace",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Evaluate, classify, score, and route content with Drex by Nace, and parse, extract, and search documents with Nace Document Intelligence",
   "license": "MIT",
   "homepage": "https://github.com/nace-ai/n8n-nodes-nace",
