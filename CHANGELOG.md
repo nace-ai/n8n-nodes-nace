@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0
+
+- Add the **Nace Document Intelligence** node (type `@nace-ai/n8n-nodes-nace.naceDocumentIntelligence`) with Document Parse, Document Extract, and Workspace Search operations. It uses the same Nace API credential; the OpenRouter backend is refused for document operations.
+- Binary sources upload to a unique `n8n/` path using the granted upload URL and upload token, never the API key. The node deletes the uploaded file after the job and also deletes the job unless Keep Job is on, also when the job fails.
+- Job calls wait with `wait_seconds` and poll until the final status, up to Max Wait (Seconds); a job that does not finish in time is cancelled unless Keep Job is on. Each job create carries an `Idempotency-Key`. Every output carries `job_id`, `request_id` when available, and `cost`.
+- Max Wait (Seconds) bounds the whole job run: the create request waits up to 100 seconds (the longest Nace keeps an HTTP request open), no request is sent at or after the deadline, and each request's HTTP timeout is capped to the remaining budget. The bound is best-effort: a request already in flight, a retry inside the HTTP client, or job and file cleanup can run slightly past the deadline. A finished job whose result was not retained fails with an explanation instead of a retry suggestion, because a repeat run starts a new, billable job.
+- A Parse download link — a `content_url` or `rows_url` anywhere in the result, for example in `document.spreadsheet.sheets[]` — keeps its job so the link stays usable, reported as `cleanup.job_kept` with the link that was found; Extract results are not searched, because their data fields are user data. Delete the kept job in the Nace console after fetching the full content. Rejected creates clean up the job Nace names in `x-drex-document-job`. Upload responses without usable file and workspace IDs are refused, and `cost` is always present, `null` when Nace does not report one.
+- Add mocked unit tests with synthetic data for the new node.
+
 ## 0.1.1
 
 - First release published from GitHub Actions with npm provenance, as n8n requires for verified community nodes. No functional changes from 0.1.0; the client version in `User-Agent` and `X-Nace-Client` is now 0.1.1.

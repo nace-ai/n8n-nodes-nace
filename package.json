@@ -1,7 +1,7 @@
 {
   "name": "@nace-ai/n8n-nodes-nace",
-  "version": "0.1.1",
-  "description": "Evaluate, classify, score, and route content with Drex by Nace",
+  "version": "0.2.0",
+  "description": "Evaluate, classify, score, and route content with Drex by Nace, and parse, extract, and search documents with Nace Document Intelligence",
   "license": "MIT",
   "homepage": "https://github.com/nace-ai/n8n-nodes-nace",
   "keywords": [
@@ -10,7 +10,11 @@
     "nace",
     "drex",
     "classification",
-    "routing"
+    "routing",
+    "documents",
+    "document-intelligence",
+    "extraction",
+    "search"
   ],
   "author": {
     "name": "Nace",
@@ -40,7 +44,8 @@
       "dist/credentials/NaceApi.credentials.js"
     ],
     "nodes": [
-      "dist/nodes/Nace/Nace.node.js"
+      "dist/nodes/Nace/Nace.node.js",
+      "dist/nodes/NaceDocumentIntelligence/NaceDocumentIntelligence.node.js"
     ]
   },
   "devDependencies": {

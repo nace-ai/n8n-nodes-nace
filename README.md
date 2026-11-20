@@ -223,6 +223,28 @@ Only the OpenRouter backend uses its generation `id`, such as `gen-dec-...`, as 
 
 All API requests, model loading, and credential tests include `User-Agent` and `X-Nace-Client`. Both are set to `n8n-nodes-nace/<package version>`.
 
+## Nace Document Intelligence node
+
+**Nace Document Intelligence** parses documents, extracts structured data from them, and answers questions about the files of a Nace workspace. It uses the same **Nace API** credential as the Drex node, with the Nace backend only.
+
+| Operation | What it does |
+| --- | --- |
+| **Document: Parse** | Turns a document into Markdown, text, or blocks for later nodes |
+| **Document: Extract** | Fills a JSON schema with typed fields, each with a status and citations |
+| **Workspace: Search** | Answers a question about the files of a workspace, with evidence and confidence. Works well as an AI Agent tool |
+
+A document comes from one of two sources: an **Input Binary Field** of an earlier node, or a public **URL** (HTTPS only). For a URL without a file name, set **File Name**; names need an extension.
+
+When the source is a binary file, the node uploads it to your Nace account, runs the job, and then deletes the uploaded file. The node also deletes the job unless Keep Job is on — including the job Nace names in the `x-drex-document-job` response header when it rejects a create request. Max Wait (Seconds) bounds the whole job run: no request is sent at or after the deadline, each request's HTTP timeout is capped to the remaining budget, and a job that does not finish within Max Wait (Seconds) is cancelled unless Keep Job is on. The bound is best-effort: a request already in flight, a retry inside the HTTP client, or job and file cleanup can run slightly past the deadline. Each job create carries an Idempotency-Key, so a retry after a rate limit does not start a second job. Uploads go to the granted upload URL with an upload token; the API key is never sent to the upload host.
+
+The one exception to job deletion: a download link in a Parse result — a `content_url` for the full payload or a `rows_url` for spreadsheet rows, at the top level, in `document`, or nested in structures such as `document.spreadsheet.sheets[]` — needs its job, because deleting the job breaks the link. The node keeps such a job and reports `job_kept` in `cleanup` with the link it found (`content_url` or `rows_url`). Extract results are never searched for these names: extracted fields are user data, so a field named `content_url` does not keep an Extract job. Fetch the full content from the link in a later node, then delete the kept job in your Nace console when you no longer need it.
+
+On zero-retention accounts, use the URL source; standalone binary uploads are refused with 422. Zero-retention accounts deliver a result only while the create request waits, so set Max Wait (Seconds) high enough for the job: the create request waits up to 100 seconds, the longest Nace keeps an HTTP request open. A finished job whose result was not retained fails with an explanation instead of a retry suggestion, because running the node again starts a new, billable job. Parse results larger than 1 MiB return a preview and the API's disclosures instead of the full payload, plus a `content_url` (or `rows_url` for spreadsheets) that serves the full content while the job exists.
+
+Every output contains `job_id`, `request_id` when available, and `cost` (`null` when Nace does not report one), plus the job result: `document` for Parse, `data` and `fields` for Extract, and `answer`, `confidence`, `evidences`, and `structured_answer` for Search. Document outputs also report the `cleanup` flags `job_deleted`, `job_kept` when the job is kept for a Parse download link (`content_url` or `rows_url`), and `file_deleted`. `file_deleted` is true only when Nace confirmed the deletion; if it is false, check the file in your Nace account.
+
+Search needs a workspace with ingested files. Create a workspace and ingest its files in the Nace console or with the Workspaces API. Search answers questions with citations; it does not return ranked passages or scores.
+
 ## Example workflows
 
 Import JSON from [examples/](examples/). Then select credentials by name.

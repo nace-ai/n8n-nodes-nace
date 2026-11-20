@@ -37,7 +37,7 @@ interface FullResponse {
 function first(value: unknown): unknown {
 	return Array.isArray(value) ? value[0] : value;
 }
-function retryDelay(headers: Record<string, unknown>, attempt: number): number {
+export function retryDelay(headers: Record<string, unknown>, attempt: number): number {
 	const ms = first(headers['retry-after-ms']);
 	if (ms !== undefined && Number.isFinite(Number(ms)) && Number(ms) >= 0) return Number(ms);
 	const retryAfter = first(headers['retry-after']);
